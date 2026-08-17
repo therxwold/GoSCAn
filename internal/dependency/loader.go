@@ -103,6 +103,7 @@ func (l Loader) Load(ctx context.Context, dir string) (*Result, error) {
 		}
 		modules = append(modules, mod)
 		selected[m.Path] = m.Version
+		fmt.Printf("selected module: %s@%s\n", m.Path, m.Version)
 	}
 
 	graphOut, err := l.Runner.Run(ctx, root, "go", "mod", "graph")
