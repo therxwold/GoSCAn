@@ -420,11 +420,11 @@ func severityFromScore(score float64) model.Severity {
 
 func idPreference(id string) int {
 	switch {
-	case strings.HasPrefix(id, "CVE-"):
-		return 0
 	case strings.HasPrefix(id, "GO-"):
-		return 1
+		return 0
 	case strings.HasPrefix(id, "GHSA-"):
+		return 1
+	case strings.HasPrefix(id, "CVE-"):
 		return 2
 	default:
 		return 3
