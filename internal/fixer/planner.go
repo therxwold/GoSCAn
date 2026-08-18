@@ -11,6 +11,10 @@ func Recommend(m model.Module, fixed, latest string) *model.FixRecommendation {
 	if fixed == "" || m.Main || m.LocalReplacement {
 		return nil
 	}
+	if m.Replace != nil {
+		return nil // Replacement directives need explicit handling; do not guess.
+	}
+
 	strategy := model.FixTransitivePin
 	reason := "pin the first fixed version in the main module so Go MVS selects it across the dependency graph"
 	gomod := &model.GoModChange{
