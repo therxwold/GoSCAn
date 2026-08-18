@@ -167,6 +167,7 @@ func (s *Scanner) Scan(ctx context.Context, dir string, opts Options) (*model.Re
 		return a.Vulnerability.ID < b.Vulnerability.ID
 	})
 	report.Warnings = uniqueSorted(report.Warnings)
+	fmt.Printf("goscan: %d finding(s)\n", len(report.Findings))
 	return report, nil
 }
 
