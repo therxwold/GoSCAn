@@ -91,7 +91,7 @@ func writeTerminal(w io.Writer, r *model.Report) error {
 			fmt.Fprintln(w, "  CVSS:     unavailable")
 		}
 		if v.EPSS != nil {
-			fmt.Fprintf(w, "  EPSS:     %.2f%% (percentile %.2f%%)\n", v.EPSS.Score, v.EPSS.Percentile)
+			fmt.Fprintf(w, "  EPSS:     %.2f%% (percentile %.2f%%)\n", v.EPSS.Score*100, v.EPSS.Percentile*100)
 		}
 		if len(v.CVEs) > 0 {
 			fmt.Fprintf(w, "  CVE:      %s\n", strings.Join(v.CVEs, ", "))
