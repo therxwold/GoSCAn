@@ -77,7 +77,7 @@ func (a Applier) Apply(ctx context.Context, root string, findings []model.Findin
 
 func backupModuleFiles(root string) ([]fileBackup, error) {
 	var out []fileBackup
-	for _, name := range []string{"go.mod"} {
+	for _, name := range []string{"go.mod", "go.sum"} {
 		path := filepath.Join(root, name)
 		data, err := os.ReadFile(path)
 		if err != nil {
