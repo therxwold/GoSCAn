@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/therxwold/GoSCAn/internal/fixer"
 	"github.com/therxwold/GoSCAn/internal/output"
 	"github.com/therxwold/GoSCAn/internal/scanner"
 )
@@ -32,6 +33,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return 0
 		case "scan":
 			return runScan(args[1:], stdout, stderr)
+		case "fix":
+			return runFix(args[1:], stdout, stderr)
 		}
 	}
 
@@ -99,11 +102,77 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+func runFix(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("goscan fix", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	apply := fs.Bool("apply", false, "apply all available first-fixed-version recommendations")
+	runTests := fs.Bool("test", true, "run go test ./... after applying fixes")
+	noEPSS := fs.Bool("no-epss", false, "disable FIRST EPSS enrichment")
+	formatName := fs.String("format", "terminal", "output format: terminal, json, sarif")
+	timeout := fs.Duration("timeout", 5*time.Minute, "overall fix/verification timeout")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() > 1 {
+		fmt.Fprintln(stderr, "goscan fix accepts at most one path")
+		return 2
+	}
+
+	dir := "."
+	if fs.NArg() == 1 {
+		dir = fs.Arg(0)
+	}
+
+	format, err := output.ParseFormat(*formatName)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 2
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+
+	s := scanner.New()
+	s.ToolVersion = strings.TrimPrefix(Version, "v")
+	report, err := s.Scan(ctx, dir, scanner.Options{NoEPSS: *noEPSS})
+	if err != nil {
+		fmt.Fprintln(stderr, "goscan:", err)
+		return 2
+	}
+	if !*apply {
+		if err := output.Write(stdout, report, format); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 2
+		}
+		return 0
+	}
+
+	if err := (fixer.Applier{}).Apply(ctx, report.Root, report.Findings, *runTests); err != nil {
+		fmt.Fprintln(stderr, "goscan fix:", err)
+		return 2
+	}
+	fmt.Fprintln(stderr, "goscan: fixes applied; rescanning")
+	post, err := s.Scan(ctx, dir, scanner.Options{NoEPSS: *noEPSS})
+	if err != nil {
+		fmt.Fprintln(stderr, "goscan rescan:", err)
+		return 2
+	}
+	if err := output.Write(stdout, post, format); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 2
+	}
+	if len(post.Findings) > 0 {
+		return 1
+	}
+	return 0
+}
+
 func usage(w io.Writer) {
 	fmt.Fprintln(w, `GoSCAn - Go dependency vulnerability scanner and remediation planner
 
 Usage:
   goscan [scan] [flags] [path]
+  goscan fix [flags] [path]
   goscan version
   goscan -v
 
@@ -116,5 +185,7 @@ Examples:
   goscan
   goscan scan --fail-on=high
   goscan scan --format=json
-  goscan scan --format=sarif > goscan.sarif`)
+  goscan scan --format=sarif > goscan.sarif
+  goscan fix
+  goscan fix --apply`)
 }
