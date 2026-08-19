@@ -55,6 +55,7 @@ func oneFix() []model.Finding {
 	}}
 }
 
+// Rollback tests intentionally cover both existing and newly created module files.
 func TestApplySuccessRunsGetTidyAndTests(t *testing.T) {
 	root := t.TempDir()
 	writeModuleFiles(t, root, true)
