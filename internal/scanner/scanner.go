@@ -50,9 +50,10 @@ type Scanner struct {
 
 // Options controls optional scan behavior.
 type Options struct {
-	NoGitHub bool
-	NoNVD    bool
-	NoEPSS   bool
+	NoGitHub    bool
+	NoNVD       bool
+	NoEPSS      bool
+	IgnoreRules map[string]string
 }
 
 // New returns a Scanner wired to the default Go, OSV, GitHub, NVD, EPSS, and version providers.
@@ -135,6 +136,7 @@ func (s *Scanner) Scan(ctx context.Context, dir string, opts Options) (*model.Re
 	s.enrichGitHub(ctx, report, opts)
 	s.enrichNVD(ctx, report, opts)
 	s.enrichEPSS(ctx, report, opts)
+	applyIgnores(report, opts.IgnoreRules)
 
 	for i := range report.Findings {
 		f := &report.Findings[i]
@@ -156,8 +158,85 @@ func (s *Scanner) Scan(ctx context.Context, dir string, opts Options) (*model.Re
 		}
 	}
 
-	sort.SliceStable(report.Findings, func(i, j int) bool {
-		a, b := report.Findings[i], report.Findings[j]
+	sortFindings(report.Findings)
+	sortFindings(report.IgnoredFindings)
+	report.Warnings = uniqueSorted(report.Warnings)
+	return report, nil
+}
+
+func applyIgnores(report *model.Report, rules map[string]string) {
+	if len(rules) == 0 || len(report.Findings) == 0 {
+		return
+	}
+
+	active := make([]model.Finding, 0, len(report.Findings))
+	for _, finding := range report.Findings {
+		rule, reason, ok := matchingIgnoreRule(finding, rules)
+		if !ok {
+			active = append(active, finding)
+			continue
+		}
+		finding.Ignored = true
+		finding.IgnoreRule = rule
+		finding.IgnoreReason = reason
+		report.IgnoredFindings = append(report.IgnoredFindings, finding)
+		report.Summary.Ignored++
+	}
+	report.Findings = active
+}
+
+func matchingIgnoreRule(finding model.Finding, rules map[string]string) (string, string, bool) {
+	identifiers := map[string]struct{}{}
+	for _, id := range append(append([]string{finding.Vulnerability.ID}, finding.Vulnerability.Aliases...), finding.Vulnerability.CVEs...) {
+		if id = strings.TrimSpace(id); id != "" {
+			identifiers[strings.ToUpper(id)] = struct{}{}
+		}
+	}
+
+	modules := map[string]struct{}{strings.ToLower(finding.Module.Path): {}}
+	if path, _, ok := finding.Module.ScanTarget(); ok {
+		modules[strings.ToLower(path)] = struct{}{}
+	}
+
+	keys := make([]string, 0, len(rules))
+	for key := range rules {
+		keys = append(keys, key)
+	}
+	sort.SliceStable(keys, func(i, j int) bool {
+		iScoped := strings.Contains(keys[i], "@")
+		jScoped := strings.Contains(keys[j], "@")
+		if iScoped != jScoped {
+			// Prefer module-scoped rules when both a scoped and global rule match.
+			return iScoped
+		}
+		return keys[i] < keys[j]
+	})
+
+	for _, key := range keys {
+		module, id := splitIgnoreRule(key)
+		if module != "" {
+			if _, ok := modules[strings.ToLower(module)]; !ok {
+				continue
+			}
+		}
+		if _, ok := identifiers[strings.ToUpper(id)]; ok {
+			return key, rules[key], true
+		}
+	}
+	return "", "", false
+}
+
+func splitIgnoreRule(rule string) (module, id string) {
+	rule = strings.TrimSpace(rule)
+	if at := strings.LastIndex(rule, "@"); at > 0 && at < len(rule)-1 {
+		return strings.TrimSpace(rule[:at]), strings.TrimSpace(rule[at+1:])
+	}
+	return "", rule
+}
+
+func sortFindings(findings []model.Finding) {
+	sort.SliceStable(findings, func(i, j int) bool {
+		a, b := findings[i], findings[j]
 		if a.Vulnerability.Severity.Rank() != b.Vulnerability.Severity.Rank() {
 			return a.Vulnerability.Severity.Rank() > b.Vulnerability.Severity.Rank()
 		}
@@ -166,8 +245,6 @@ func (s *Scanner) Scan(ctx context.Context, dir string, opts Options) (*model.Re
 		}
 		return a.Vulnerability.ID < b.Vulnerability.ID
 	})
-	report.Warnings = uniqueSorted(report.Warnings)
-	return report, nil
 }
 
 func (s *Scanner) enrichGitHub(ctx context.Context, report *model.Report, opts Options) {

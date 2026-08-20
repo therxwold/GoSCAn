@@ -56,6 +56,7 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
+	ignoreRules := copyIgnoreRules(cfg.Ignore.Rules)
 	fs := flag.NewFlagSet("goscan scan", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	_ = fs.String("config", configPath, "configuration file (default config.yml when present)")
@@ -68,6 +69,10 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 	noGitHub := fs.Bool("no-github", false, "disable GitHub Advisory Database enrichment")
 	noNVD := fs.Bool("no-nvd", false, "disable NVD enrichment")
 	noEPSS := fs.Bool("no-epss", !cfg.EPSS.Enabled, "disable FIRST EPSS enrichment")
+	showIgnored := fs.Bool("show-ignored", cfg.Ignore.Show, "show findings suppressed as false positives")
+	fs.Func("ignore", "ignore advisory ID or module@ID; append =reason if wanted; repeatable", func(value string) error {
+		return addIgnoreRule(ignoreRules, value)
+	})
 	githubToken := fs.String("github-token", "", "GitHub token override; environment variables are safer")
 	nvdAPIKey := fs.String("nvd-api-key", "", "NVD API key override; environment variables are safer")
 	timeout := fs.Duration("timeout", cfg.Scan.Timeout, "overall scan timeout")
@@ -124,12 +129,12 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 	s.ToolVersion = strings.TrimPrefix(Version, "v")
 	s.GitHub = githubadvisory.Client{Token: githubAuth}
 	s.NVD = nvd.Client{APIKey: nvdAuth}
-	report, err := s.Scan(ctx, dir, scanner.Options{NoGitHub: !*githubEnabled, NoNVD: !*nvdEnabled, NoEPSS: *noEPSS})
+	report, err := s.Scan(ctx, dir, scanner.Options{NoGitHub: !*githubEnabled, NoNVD: !*nvdEnabled, NoEPSS: *noEPSS, IgnoreRules: ignoreRules})
 	if err != nil {
 		fmt.Fprintln(stderr, "goscan:", err)
 		return 2
 	}
-	if err := output.Write(stdout, report, format); err != nil {
+	if err := output.Write(stdout, report, format, output.WriteOptions{ShowIgnored: *showIgnored}); err != nil {
 		fmt.Fprintln(stderr, "goscan:", err)
 		return 2
 	}
@@ -151,6 +156,7 @@ func runFix(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
+	ignoreRules := copyIgnoreRules(cfg.Ignore.Rules)
 	fs := flag.NewFlagSet("goscan fix", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	_ = fs.String("config", configPath, "configuration file (default config.yml when present)")
@@ -161,6 +167,10 @@ func runFix(args []string, stdout, stderr io.Writer) int {
 	noGitHub := fs.Bool("no-github", false, "disable GitHub Advisory Database enrichment")
 	noNVD := fs.Bool("no-nvd", false, "disable NVD enrichment")
 	noEPSS := fs.Bool("no-epss", !cfg.EPSS.Enabled, "disable FIRST EPSS enrichment")
+	showIgnored := fs.Bool("show-ignored", cfg.Ignore.Show, "show findings suppressed as false positives")
+	fs.Func("ignore", "ignore advisory ID or module@ID; append =reason if wanted; repeatable", func(value string) error {
+		return addIgnoreRule(ignoreRules, value)
+	})
 	githubToken := fs.String("github-token", "", "GitHub token override; environment variables are safer")
 	nvdAPIKey := fs.String("nvd-api-key", "", "NVD API key override; environment variables are safer")
 	formatName := fs.String("format", cfg.Output.Format, "output format: terminal, json, sarif")
@@ -206,14 +216,14 @@ func runFix(args []string, stdout, stderr io.Writer) int {
 	s.ToolVersion = strings.TrimPrefix(Version, "v")
 	s.GitHub = githubadvisory.Client{Token: githubAuth}
 	s.NVD = nvd.Client{APIKey: nvdAuth}
-	opts := scanner.Options{NoGitHub: !*githubEnabled, NoNVD: !*nvdEnabled, NoEPSS: *noEPSS}
+	opts := scanner.Options{NoGitHub: !*githubEnabled, NoNVD: !*nvdEnabled, NoEPSS: *noEPSS, IgnoreRules: ignoreRules}
 	report, err := s.Scan(ctx, dir, opts)
 	if err != nil {
 		fmt.Fprintln(stderr, "goscan:", err)
 		return 2
 	}
-	if !*apply {
-		if err := output.Write(stdout, report, format); err != nil {
+	if !*apply || len(report.Findings) == 0 {
+		if err := output.Write(stdout, report, format, output.WriteOptions{ShowIgnored: *showIgnored}); err != nil {
 			fmt.Fprintln(stderr, err)
 			return 2
 		}
@@ -230,7 +240,7 @@ func runFix(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "goscan rescan:", err)
 		return 2
 	}
-	if err := output.Write(stdout, post, format); err != nil {
+	if err := output.Write(stdout, post, format, output.WriteOptions{ShowIgnored: *showIgnored}); err != nil {
 		fmt.Fprintln(stderr, err)
 		return 2
 	}
@@ -238,6 +248,31 @@ func runFix(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+func copyIgnoreRules(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in))
+	for key, reason := range in {
+		out[key] = reason
+	}
+	return out
+}
+
+func addIgnoreRule(rules map[string]string, value string) error {
+	key, reason, hasReason := strings.Cut(strings.TrimSpace(value), "=")
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return fmt.Errorf("--ignore requires an advisory ID or module@ID")
+	}
+	if !hasReason {
+		reason = "ignored from CLI"
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return fmt.Errorf("--ignore reason cannot be empty")
+	}
+	rules[key] = reason
+	return nil
 }
 
 func usage(w io.Writer) {
@@ -259,6 +294,8 @@ Examples:
   goscan scan --fail-on=high
   goscan scan --format=json
   goscan scan --no-nvd --no-github
+  goscan scan --ignore GO-2026-1234
+  goscan scan --show-ignored
   goscan scan --config=config.yml
   goscan scan --format=sarif > goscan.sarif
   goscan fix

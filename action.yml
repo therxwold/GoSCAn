@@ -34,6 +34,14 @@ inputs:
     description: Disable EPSS enrichment.
     required: false
     default: "false"
+  ignore:
+    description: Newline-separated advisory IDs or module@ID rules; append =reason when useful.
+    required: false
+    default: ""
+  show-ignored:
+    description: Include ignored false positives in terminal or SARIF output.
+    required: false
+    default: "false"
 runs:
   using: composite
   steps:
@@ -63,6 +71,8 @@ runs:
         GOSCAN_NO_GITHUB: ${{ inputs.no-github }}
         GOSCAN_NO_NVD: ${{ inputs.no-nvd }}
         GOSCAN_NO_EPSS: ${{ inputs.no-epss }}
+        GOSCAN_IGNORE: ${{ inputs.ignore }}
+        GOSCAN_SHOW_IGNORED: ${{ inputs.show-ignored }}
       run: |
         set -euo pipefail
         args=(scan --fail-on "$GOSCAN_FAIL_ON" --epss-threshold "$GOSCAN_EPSS_THRESHOLD" --format "$GOSCAN_FORMAT")
@@ -77,6 +87,14 @@ runs:
         fi
         if [[ "$GOSCAN_NO_EPSS" == "true" ]]; then
           args+=(--no-epss)
+        fi
+        if [[ "$GOSCAN_SHOW_IGNORED" == "true" ]]; then
+          args+=(--show-ignored)
+        fi
+        if [[ -n "$GOSCAN_IGNORE" ]]; then
+          while IFS= read -r rule; do
+            [[ -n "$rule" ]] && args+=(--ignore "$rule")
+          done <<< "$GOSCAN_IGNORE"
         fi
         cd "$GITHUB_WORKSPACE"
         "$RUNNER_TEMP/goscan" "${args[@]}"

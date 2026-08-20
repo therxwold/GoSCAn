@@ -21,6 +21,7 @@ Its job is not only to say that a dependency is vulnerable. It also explains why
 - Recommends an explicit `// indirect` `go.mod` requirement for vulnerable transitive dependencies when there is a fixed version.
 - Supports terminal, JSON, and SARIF output.
 - Supports CI policy exits by severity and/or EPSS threshold.
+- Supports auditable false-positive ignore rules by GO/GHSA/CVE alias, with optional module scoping.
 - Can apply fixes with `go get`, run `go mod tidy`, run tests, and roll back `go.mod`/`go.sum` if verification fails.
 
 Local filesystem replacements are intentionally skipped because a registry version no longer identifies the code being built. Versioned `replace` targets are scanned, but GoSCAn does not automatically rewrite replacement directives because guessing the intended replacement scope is unsafe.
@@ -129,6 +130,11 @@ nvd:
 epss:
   enabled: true
 
+ignore:
+  show: false
+  # GO-2026-1234: "vulnerable code path is not reachable in this application"
+  # golang.org/x/net@CVE-2026-12345: "not affected on supported targets"
+
 scan:
   fail_on: "none"
   epss_threshold: -1
@@ -169,6 +175,47 @@ goscan scan --no-epss
 ```
 
 The equivalent positive boolean flags, `--github` and `--nvd`, are also available and can be set explicitly with Go flag syntax such as `--github=false`. Tokens also have `--github-token` and `--nvd-api-key` overrides, although environment variables are safer because command-line arguments may be visible to other local processes or CI logs.
+
+## Ignoring false positives
+
+Known false positives can be suppressed in `config.yml` without deleting them from the report data. Each rule needs a reason so an exception does not quietly turn into permanent security wallpaper.
+
+A rule can match the primary Go advisory ID or any known GHSA/CVE alias:
+
+```yaml
+ignore:
+  show: false
+  GO-2026-1234: "vulnerable code path is not reachable in this application"
+  CVE-2026-56789: "upstream confirmed this platform is not affected"
+```
+
+To limit an exception to one dependency, prefix the advisory with the module path:
+
+```yaml
+ignore:
+  golang.org/x/net@CVE-2026-56789: "only the unsupported target is affected"
+```
+
+Ignored findings are excluded from severity/EPSS CI failure decisions and from automatic fix application. JSON keeps them under `ignored_findings` with the matching rule and reason so the suppression remains auditable.
+
+For a temporary CLI exception, `--ignore` is repeatable:
+
+```bash
+goscan scan --ignore GO-2026-1234
+goscan scan --ignore 'CVE-2026-56789=confirmed false positive by upstream'
+goscan scan --ignore 'golang.org/x/net@CVE-2026-56789=unsupported target only'
+```
+
+A CLI ignore without `=reason` is recorded as `ignored from CLI`. Persistent exceptions should live in `config.yml` with an explicit reason.
+
+Ignored findings stay out of normal terminal/SARIF output. Show them when reviewing suppressions:
+
+```bash
+goscan scan --show-ignored
+goscan scan --show-ignored --format=sarif
+```
+
+When included in SARIF, ignored findings use an accepted external suppression and retain the justification. JSON always retains ignored findings regardless of `--show-ignored`.
 
 ## Fix planning and application
 
@@ -269,9 +316,12 @@ jobs:
           fail-on: high
           epss-threshold: "0.10"
           nvd-api-key: ${{ secrets.NVD_API_KEY }}
+          ignore: |
+            GO-2026-1234=confirmed false positive
+            golang.org/x/net@CVE-2026-56789=unsupported target only
 ```
 
-The action builds GoSCAn using the Go version declared by GoSCAn itself, then scans the caller workspace. GitHub Advisory enrichment automatically uses the workflow `github.token`; an NVD API key can be passed from a repository secret. This avoids making the scanner build depend on whether the target project uses an older Go release.
+The action builds GoSCAn using the Go version declared by GoSCAn itself, then scans the caller workspace. GitHub Advisory enrichment automatically uses the workflow `github.token`; an NVD API key can be passed from a repository secret. Ignore rules can come from the selected `config.yml` or the newline-separated `ignore` input. This avoids making the scanner build depend on whether the target project uses an older Go release.
 
 ## Other CI systems
 
@@ -310,7 +360,7 @@ go vet ./...
 make build
 ```
 
-The test suite is written and maintained by **Eluuna**. It is deliberately strict around the parts most likely to lie: dependency classification and graph paths, local module-graph integration, OSV alias grouping/pagination/fixed-version selection, GitHub/NVD enrichment, config precedence, EPSS parsing, CVSS 2.0/3.x/4.0 scoring, version resolution, terminal/JSON/SARIF output, CI severity/EPSS policy evaluation, and remediation planning.
+The test suite is written and maintained by **Eluuna**. It is deliberately strict around the parts most likely to lie: dependency classification and graph paths, local module-graph integration, OSV alias grouping/pagination/fixed-version selection, GitHub/NVD enrichment, config precedence, false-positive suppression and module scoping, EPSS parsing, CVSS 2.0/3.x/4.0 scoring, version resolution, terminal/JSON/SARIF output, CI severity/EPSS policy evaluation, and remediation planning.
 
 Fix application tests verify the successful `go get` -> `go mod tidy` -> `go test ./...` sequence, highest-fixed-version deduplication, optional test skipping, replacement safety, rollback on `go get` failure, rollback on `go mod tidy` failure, rollback on test failure, restoration of both `go.mod` and `go.sum`, and removal of a newly created `go.sum` during rollback.
 

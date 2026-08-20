@@ -16,6 +16,7 @@ type Config struct {
 	GitHub GitHubConfig
 	NVD    NVDConfig
 	EPSS   EPSSConfig
+	Ignore IgnoreConfig
 	Scan   ScanConfig
 	Fix    FixConfig
 	Output OutputConfig
@@ -36,6 +37,12 @@ type NVDConfig struct {
 // EPSSConfig controls FIRST EPSS enrichment.
 type EPSSConfig struct {
 	Enabled bool
+}
+
+// IgnoreConfig contains accepted false-positive rules and display preferences.
+type IgnoreConfig struct {
+	Show  bool
+	Rules map[string]string
 }
 
 // ScanConfig contains defaults used by the scan command.
@@ -68,6 +75,7 @@ type fileConfig struct {
 	EPSS *struct {
 		Enabled *bool `yaml:"enabled"`
 	} `yaml:"epss"`
+	Ignore map[string]any `yaml:"ignore"`
 	Scan   *struct {
 		FailOn        *string  `yaml:"fail_on"`
 		EPSSThreshold *float64 `yaml:"epss_threshold"`
@@ -88,6 +96,7 @@ func Default() Config {
 		GitHub: GitHubConfig{Enabled: true},
 		NVD:    NVDConfig{Enabled: true},
 		EPSS:   EPSSConfig{Enabled: true},
+		Ignore: IgnoreConfig{Rules: map[string]string{}},
 		Scan: ScanConfig{
 			FailOn:        "none",
 			EPSSThreshold: -1,
@@ -181,6 +190,26 @@ func mergeFileConfig(cfg *Config, raw fileConfig) error {
 	}
 	if raw.EPSS != nil && raw.EPSS.Enabled != nil {
 		cfg.EPSS.Enabled = *raw.EPSS.Enabled
+	}
+	if raw.Ignore != nil {
+		if cfg.Ignore.Rules == nil {
+			cfg.Ignore.Rules = map[string]string{}
+		}
+		for key, value := range raw.Ignore {
+			if key == "show" {
+				show, ok := value.(bool)
+				if !ok {
+					return fmt.Errorf("ignore.show must be a boolean")
+				}
+				cfg.Ignore.Show = show
+				continue
+			}
+			reason, ok := value.(string)
+			if !ok || strings.TrimSpace(reason) == "" {
+				return fmt.Errorf("ignore rule %s requires a reason", key)
+			}
+			cfg.Ignore.Rules[strings.TrimSpace(key)] = strings.TrimSpace(reason)
+		}
 	}
 	if raw.Scan != nil {
 		if raw.Scan.FailOn != nil {

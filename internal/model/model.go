@@ -162,6 +162,9 @@ type Finding struct {
 	LatestVersion string             `json:"latest_version,omitempty"`
 	Paths         [][]ModuleRef      `json:"paths,omitempty"`
 	Fix           *FixRecommendation `json:"fix,omitempty"`
+	Ignored       bool               `json:"ignored,omitempty"`
+	IgnoreRule    string             `json:"ignore_rule,omitempty"`
+	IgnoreReason  string             `json:"ignore_reason,omitempty"`
 }
 
 // Summary contains dependency and vulnerability counts for a scan.
@@ -177,15 +180,17 @@ type Summary struct {
 	Medium   int `json:"medium"`
 	Low      int `json:"low"`
 	Unknown  int `json:"unknown"`
+	Ignored  int `json:"ignored"`
 }
 
 // Report is the complete result of a GoSCAn dependency vulnerability scan.
 type Report struct {
-	Root        string    `json:"-"`
-	ToolVersion string    `json:"tool_version"`
-	Module      string    `json:"module"`
-	ScannedAt   time.Time `json:"scanned_at"`
-	Summary     Summary   `json:"summary"`
-	Findings    []Finding `json:"findings"`
-	Warnings    []string  `json:"warnings,omitempty"`
+	Root            string    `json:"-"`
+	ToolVersion     string    `json:"tool_version"`
+	Module          string    `json:"module"`
+	ScannedAt       time.Time `json:"scanned_at"`
+	Summary         Summary   `json:"summary"`
+	Findings        []Finding `json:"findings"`
+	IgnoredFindings []Finding `json:"ignored_findings,omitempty"`
+	Warnings        []string  `json:"warnings,omitempty"`
 }

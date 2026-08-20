@@ -181,3 +181,48 @@ func TestScanKeepsOSVFindingWhenEnrichmentFails(t *testing.T) {
 		t.Fatalf("expected enrichment warnings, got %v", r.Warnings)
 	}
 }
+
+func TestScanIgnoresFalsePositiveByAlias(t *testing.T) {
+	g := dependency.ParseGraph([]byte("example.com/app example.com/deep@v1.2.0\n"), map[string]string{"example.com/app": "", "example.com/deep": "v1.2.0"})
+	g.AddRoot("example.com/app")
+	s := &Scanner{
+		Dependencies: fakeDeps{&dependency.Result{Root: "/x", MainModule: "example.com/app", Modules: []model.Module{
+			{Path: "example.com/app", Main: true, Kind: model.DependencyMain},
+			{Path: "example.com/deep", Version: "v1.2.0", Kind: model.DependencyDirect},
+		}, Graph: g}},
+		Vulnerabilities: fakeVulns{}, Versions: fakeLatest{},
+	}
+	r, err := s.Scan(context.Background(), ".", Options{NoGitHub: true, NoNVD: true, NoEPSS: true, IgnoreRules: map[string]string{
+		"CVE-2026-1": "false positive in this application",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Findings) != 0 || len(r.IgnoredFindings) != 1 || r.Summary.Ignored != 1 {
+		t.Fatalf("unexpected ignored findings: %#v", r)
+	}
+	ignored := r.IgnoredFindings[0]
+	if !ignored.Ignored || ignored.IgnoreRule != "CVE-2026-1" || ignored.IgnoreReason != "false positive in this application" {
+		t.Fatalf("unexpected ignore metadata: %#v", ignored)
+	}
+	if ignored.Fix != nil {
+		t.Fatalf("ignored finding should not have a fix: %#v", ignored.Fix)
+	}
+	if Exceeds(r, model.SeverityLow, 0) {
+		t.Fatal("ignored finding must not fail CI policy")
+	}
+}
+
+func TestModuleScopedIgnoreDoesNotSuppressAnotherModule(t *testing.T) {
+	finding := model.Finding{
+		Module:        model.Module{Path: "example.com/deep", Version: "v1.2.0"},
+		Vulnerability: model.Vulnerability{ID: "GO-2026-1", Aliases: []string{"GHSA-test-1234-5678"}, CVEs: []string{"CVE-2026-1"}},
+	}
+	if _, _, ok := matchingIgnoreRule(finding, map[string]string{"example.com/other@CVE-2026-1": "other module only"}); ok {
+		t.Fatal("module-scoped rule matched the wrong module")
+	}
+	rule, reason, ok := matchingIgnoreRule(finding, map[string]string{"example.com/deep@GHSA-test-1234-5678": "accepted false positive"})
+	if !ok || rule != "example.com/deep@GHSA-test-1234-5678" || reason != "accepted false positive" {
+		t.Fatalf("unexpected scoped match: rule=%q reason=%q ok=%v", rule, reason, ok)
+	}
+}

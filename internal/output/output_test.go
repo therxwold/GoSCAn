@@ -67,3 +67,70 @@ func TestSARIF(t *testing.T) {
 		t.Fatal(b.String())
 	}
 }
+
+func TestIgnoredFindingsAreHiddenUnlessRequested(t *testing.T) {
+	r := sampleReport()
+	ignored := r.Findings[0]
+	ignored.Ignored = true
+	ignored.IgnoreRule = "GO-1"
+	ignored.IgnoreReason = "accepted false positive"
+	r.IgnoredFindings = []model.Finding{ignored}
+	r.Summary.Ignored = 1
+
+	var hidden bytes.Buffer
+	if err := Write(&hidden, r, FormatTerminal); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(hidden.String(), "accepted false positive") {
+		t.Fatal("ignored finding should be hidden by default")
+	}
+	if !strings.Contains(hidden.String(), "1 ignored") {
+		t.Fatal(hidden.String())
+	}
+
+	var shown bytes.Buffer
+	if err := Write(&shown, r, FormatTerminal, WriteOptions{ShowIgnored: true}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(shown.String(), "Ignored / false positives") || !strings.Contains(shown.String(), "accepted false positive") {
+		t.Fatal(shown.String())
+	}
+}
+
+func TestJSONKeepsIgnoredFindingsForAudit(t *testing.T) {
+	r := sampleReport()
+	ignored := r.Findings[0]
+	ignored.Ignored = true
+	ignored.IgnoreRule = "CVE-1"
+	ignored.IgnoreReason = "not affected"
+	r.IgnoredFindings = []model.Finding{ignored}
+
+	var b bytes.Buffer
+	if err := Write(&b, r, FormatJSON); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"ignored_findings"`, `"ignored": true`, `"ignore_reason": "not affected"`} {
+		if !strings.Contains(b.String(), want) {
+			t.Fatalf("missing %s in %s", want, b.String())
+		}
+	}
+}
+
+func TestSARIFCanMarkIgnoredFindingAsSuppressed(t *testing.T) {
+	r := sampleReport()
+	ignored := r.Findings[0]
+	ignored.Ignored = true
+	ignored.IgnoreRule = "GO-1"
+	ignored.IgnoreReason = "accepted false positive"
+	r.IgnoredFindings = []model.Finding{ignored}
+
+	var b bytes.Buffer
+	if err := Write(&b, r, FormatSARIF, WriteOptions{ShowIgnored: true}); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"suppressions"`, `"kind": "external"`, `"status": "accepted"`, `"justification": "accepted false positive"`} {
+		if !strings.Contains(b.String(), want) {
+			t.Fatalf("missing %s in %s", want, b.String())
+		}
+	}
+}

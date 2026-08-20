@@ -35,15 +35,24 @@ func ParseFormat(v string) (Format, error) {
 	}
 }
 
+// WriteOptions controls optional presentation of a report.
+type WriteOptions struct {
+	ShowIgnored bool
+}
+
 // Write renders report in the requested output format.
-func Write(w io.Writer, report *model.Report, format Format) error {
+func Write(w io.Writer, report *model.Report, format Format, options ...WriteOptions) error {
+	var opts WriteOptions
+	if len(options) > 0 {
+		opts = options[0]
+	}
 	switch format {
 	case FormatJSON:
 		return writeJSON(w, report)
 	case FormatSARIF:
-		return writeSARIF(w, report)
+		return writeSARIF(w, report, opts)
 	default:
-		return writeTerminal(w, report)
+		return writeTerminal(w, report, opts)
 	}
 }
 
@@ -53,7 +62,7 @@ func writeJSON(w io.Writer, report *model.Report) error {
 	return enc.Encode(report)
 }
 
-func writeTerminal(w io.Writer, r *model.Report) error {
+func writeTerminal(w io.Writer, r *model.Report, opts WriteOptions) error {
 	fmt.Fprintf(w, "GoSCAn %s\n\n", r.ToolVersion)
 	fmt.Fprintf(w, "Module: %s\n", r.Module)
 	fmt.Fprintf(w, "Dependencies: %d total (%d direct, %d indirect, %d transitive", r.Summary.Modules, r.Summary.Direct, r.Summary.Indirect, r.Summary.Transitive)
@@ -61,9 +70,16 @@ func writeTerminal(w io.Writer, r *model.Report) error {
 		fmt.Fprintf(w, ", %d skipped", r.Summary.Skipped)
 	}
 	fmt.Fprintln(w, ")")
-	fmt.Fprintf(w, "Vulnerabilities: %d critical, %d high, %d medium, %d low, %d unknown\n", r.Summary.Critical, r.Summary.High, r.Summary.Medium, r.Summary.Low, r.Summary.Unknown)
+	fmt.Fprintf(w, "Vulnerabilities: %d critical, %d high, %d medium, %d low, %d unknown", r.Summary.Critical, r.Summary.High, r.Summary.Medium, r.Summary.Low, r.Summary.Unknown)
+	if r.Summary.Ignored > 0 {
+		fmt.Fprintf(w, " (%d ignored)", r.Summary.Ignored)
+	}
+	fmt.Fprintln(w)
 	if len(r.Findings) == 0 {
-		fmt.Fprintln(w, "\nNo known vulnerabilities found.")
+		fmt.Fprintln(w, "\nNo active known vulnerabilities found.")
+		if opts.ShowIgnored {
+			writeIgnored(w, r.IgnoredFindings)
+		}
 		writeWarnings(w, r)
 		return nil
 	}
@@ -135,8 +151,23 @@ func writeTerminal(w io.Writer, r *model.Report) error {
 			}
 		}
 	}
+	if opts.ShowIgnored {
+		writeIgnored(w, r.IgnoredFindings)
+	}
 	writeWarnings(w, r)
 	return nil
+}
+
+func writeIgnored(w io.Writer, findings []model.Finding) {
+	if len(findings) == 0 {
+		return
+	}
+	fmt.Fprintln(w, "\nIgnored / false positives:")
+	for _, f := range findings {
+		fmt.Fprintf(w, "  %s  %s@%s\n", f.Vulnerability.ID, f.Module.Path, f.Module.Version)
+		fmt.Fprintf(w, "    Rule:   %s\n", f.IgnoreRule)
+		fmt.Fprintf(w, "    Reason: %s\n", f.IgnoreReason)
+	}
 }
 
 func writeWarnings(w io.Writer, r *model.Report) {
@@ -174,11 +205,18 @@ type sarifMessage struct {
 	Text string `json:"text"`
 }
 type sarifResult struct {
-	RuleID     string          `json:"ruleId"`
-	Level      string          `json:"level"`
-	Message    sarifMessage    `json:"message"`
-	Locations  []sarifLocation `json:"locations,omitempty"`
-	Properties map[string]any  `json:"properties,omitempty"`
+	RuleID       string             `json:"ruleId"`
+	Level        string             `json:"level"`
+	Message      sarifMessage       `json:"message"`
+	Locations    []sarifLocation    `json:"locations,omitempty"`
+	Properties   map[string]any     `json:"properties,omitempty"`
+	Suppressions []sarifSuppression `json:"suppressions,omitempty"`
+}
+
+type sarifSuppression struct {
+	Kind          string `json:"kind"`
+	Status        string `json:"status,omitempty"`
+	Justification string `json:"justification,omitempty"`
 }
 type sarifLocation struct {
 	PhysicalLocation sarifPhysicalLocation `json:"physicalLocation"`
@@ -190,10 +228,15 @@ type sarifArtifactLocation struct {
 	URI string `json:"uri"`
 }
 
-func writeSARIF(w io.Writer, r *model.Report) error {
+func writeSARIF(w io.Writer, r *model.Report, opts WriteOptions) error {
+	findings := append([]model.Finding(nil), r.Findings...)
+	if opts.ShowIgnored {
+		findings = append(findings, r.IgnoredFindings...)
+	}
+
 	rules := map[string]sarifRule{}
-	results := make([]sarifResult, 0, len(r.Findings))
-	for _, f := range r.Findings {
+	results := make([]sarifResult, 0, len(findings))
+	for _, f := range findings {
 		v := f.Vulnerability
 		rules[v.ID] = sarifRule{ID: v.ID, ShortDescription: sarifMessage{Text: v.Summary}}
 		props := map[string]any{"module": f.Module.Path, "version": f.Module.Version, "dependencyKind": f.Module.Kind}
@@ -215,11 +258,20 @@ func writeSARIF(w io.Writer, r *model.Report) error {
 		if v.KnownExploited {
 			props["knownExploited"] = true
 		}
+		if f.Ignored {
+			props["ignored"] = true
+			props["ignoreRule"] = f.IgnoreRule
+			props["ignoreReason"] = f.IgnoreReason
+		}
 		msg := fmt.Sprintf("%s affects %s@%s", v.ID, f.Module.Path, f.Module.Version)
 		if v.Fixed != "" {
 			msg += ", fixed in " + v.Fixed
 		}
-		results = append(results, sarifResult{RuleID: v.ID, Level: sarifLevel(v.Severity), Message: sarifMessage{Text: msg}, Locations: []sarifLocation{{PhysicalLocation: sarifPhysicalLocation{ArtifactLocation: sarifArtifactLocation{URI: "go.mod"}}}}, Properties: props})
+		result := sarifResult{RuleID: v.ID, Level: sarifLevel(v.Severity), Message: sarifMessage{Text: msg}, Locations: []sarifLocation{{PhysicalLocation: sarifPhysicalLocation{ArtifactLocation: sarifArtifactLocation{URI: "go.mod"}}}}, Properties: props}
+		if f.Ignored {
+			result.Suppressions = []sarifSuppression{{Kind: "external", Status: "accepted", Justification: f.IgnoreReason}}
+		}
+		results = append(results, result)
 	}
 	ruleList := make([]sarifRule, 0, len(rules))
 	for _, rule := range rules {
@@ -230,6 +282,7 @@ func writeSARIF(w io.Writer, r *model.Report) error {
 	enc.SetIndent("", "  ")
 	return enc.Encode(log)
 }
+
 func sarifLevel(s model.Severity) string {
 	switch s {
 	case model.SeverityCritical, model.SeverityHigh:

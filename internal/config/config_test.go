@@ -18,6 +18,10 @@ nvd:
   api_key: "nvd-file"
 epss:
   enabled: false
+ignore:
+  show: true
+  GO-2026-1234: "not reachable in our build"
+  example.com/deep@CVE-2026-9999: "not affected on supported targets"
 scan:
   fail_on: "high"
   epss_threshold: 0.2
@@ -38,7 +42,10 @@ output:
 	if cfg.GitHub.Enabled || cfg.GitHub.Token != "file-token" || !cfg.NVD.Enabled || cfg.NVD.APIKey != "nvd-file" {
 		t.Fatalf("unexpected source config: %#v", cfg)
 	}
-	if cfg.EPSS.Enabled || cfg.Scan.FailOn != "high" || cfg.Scan.EPSSThreshold != 0.2 || cfg.Scan.Timeout != 45*time.Second {
+	if cfg.EPSS.Enabled || !cfg.Ignore.Show || len(cfg.Ignore.Rules) != 2 || cfg.Ignore.Rules["GO-2026-1234"] != "not reachable in our build" {
+		t.Fatalf("unexpected ignore config: %#v", cfg.Ignore)
+	}
+	if cfg.Scan.FailOn != "high" || cfg.Scan.EPSSThreshold != 0.2 || cfg.Scan.Timeout != 45*time.Second {
 		t.Fatalf("unexpected scan config: %#v", cfg)
 	}
 	if cfg.Fix.RunTests || cfg.Fix.Timeout != 3*time.Minute || cfg.Output.Format != "json" {
@@ -81,6 +88,17 @@ func TestPathFromArgs(t *testing.T) {
 	}
 	if path != "custom.yml" || !explicit {
 		t.Fatalf("got path=%q explicit=%v", path, explicit)
+	}
+}
+
+func TestIgnoreRuleRequiresReason(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yml")
+	if err := os.WriteFile(path, []byte("ignore:\n  GO-2026-1234:\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path, true); err == nil {
+		t.Fatal("expected empty ignore reason to fail")
 	}
 }
 

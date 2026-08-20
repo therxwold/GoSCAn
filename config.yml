@@ -12,6 +12,13 @@ nvd:
 epss:
   enabled: true
 
+# Accepted false positives. The key can be an advisory ID/alias, or module@ID
+# to suppress only one dependency. Keep a reason so the exception is auditable.
+ignore:
+  show: false
+  # GO-2026-1234: "vulnerable code path is not reachable in this application"
+  # golang.org/x/net@CVE-2026-12345: "not affected on supported targets"
+
 scan:
   fail_on: "none"
   epss_threshold: -1
