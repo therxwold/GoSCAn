@@ -28,14 +28,17 @@ type Result struct {
 	MainModule string
 	Modules    []model.Module
 	Graph      *Graph
+	Warnings   []string
 }
 
 type goListModule struct {
-	Path    string        `json:"Path"`
-	Version string        `json:"Version"`
-	Main    bool          `json:"Main"`
-	Dir     string        `json:"Dir"`
-	Replace *goListModule `json:"Replace"`
+	Path      string        `json:"Path"`
+	Version   string        `json:"Version"`
+	Main      bool          `json:"Main"`
+	Dir       string        `json:"Dir"`
+	GoMod     string        `json:"GoMod"`
+	GoVersion string        `json:"GoVersion"`
+	Replace   *goListModule `json:"Replace"`
 }
 
 // Load resolves every selected module and its dependency graph for dir.
@@ -100,6 +103,7 @@ func (l Loader) Load(ctx context.Context, dir string) (*Result, error) {
 			Main:                m.Main,
 			Explicit:            explicit,
 			IndirectRequirement: indirectReq,
+			GoVersion:           m.GoVersion,
 		}
 		if m.Replace != nil {
 			mod.Replace = &model.ModuleRef{Path: m.Replace.Path, Version: m.Replace.Version}
@@ -116,7 +120,37 @@ func (l Loader) Load(ctx context.Context, dir string) (*Result, error) {
 	graph := ParseGraph(graphOut, selected)
 	graph.AddRoot(mainPath)
 
-	return &Result{Root: root, MainModule: mainPath, Modules: modules, Graph: graph}, nil
+	_, mainRequirements, err = readManifest(gomod, selected)
+	if err != nil {
+		return nil, fmt.Errorf("read go.mod requirements: %w", err)
+	}
+	manifestRequirements := map[string][]model.ModuleRequirement{
+		mainPath: mainRequirements,
+	}
+	manifestAudited := map[string]bool{mainPath: true}
+	var warnings []string
+	for _, listedModule := range listed {
+		if listedModule.Main || listedModule.GoMod == "" {
+			continue
+		}
+		_, requirements, err := readManifest(listedModule.GoMod, selected)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("inspect %s@%s go.mod: %v", listedModule.Path, listedModule.Version, err))
+			continue
+		}
+		manifestRequirements[listedModule.Path] = requirements
+		manifestAudited[listedModule.Path] = true
+	}
+	for i := range modules {
+		reqs, ok := manifestRequirements[modules[i].Path]
+		if !ok {
+			reqs = graph.RequirementsFrom(modules[i].Path)
+		}
+		modules[i].Requires = reqs
+		modules[i].ManifestAudited = manifestAudited[modules[i].Path]
+	}
+
+	return &Result{Root: root, MainModule: mainPath, Modules: modules, Graph: graph, Warnings: warnings}, nil
 }
 
 func decodeModuleStream(data []byte) ([]goListModule, error) {
@@ -139,13 +173,7 @@ func decodeModuleStream(data []byte) ([]goListModule, error) {
 	return out, nil
 }
 
-type manifestRequirement struct {
-	Path     string
-	Version  string
-	Indirect bool
-}
-
-func readManifest(path string, selected map[string]string) (string, []manifestRequirement, error) {
+func readManifest(path string, selected map[string]string) (string, []model.ModuleRequirement, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", nil, err
@@ -154,27 +182,37 @@ func readManifest(path string, selected map[string]string) (string, []manifestRe
 	if err != nil {
 		return "", nil, err
 	}
+
 	modulePath := ""
 	if file.Module != nil {
 		modulePath = file.Module.Mod.Path
 	}
-	requirements := make([]manifestRequirement, 0, len(file.Require))
+	requirements := make([]model.ModuleRequirement, 0, len(file.Require))
 	for _, requirement := range file.Require {
-		requirements = append(requirements, manifestRequirement{
-			Path: requirement.Mod.Path, Version: requirement.Mod.Version, Indirect: requirement.Indirect,
+		requirements = append(requirements, model.ModuleRequirement{
+			Path:            requirement.Mod.Path,
+			Version:         requirement.Mod.Version,
+			SelectedVersion: selected[requirement.Mod.Path],
+			Indirect:        requirement.Indirect,
 		})
 	}
+	sort.Slice(requirements, func(i, j int) bool {
+		if requirements[i].Path != requirements[j].Path {
+			return requirements[i].Path < requirements[j].Path
+		}
+		return requirements[i].Version < requirements[j].Version
+	})
 	return modulePath, requirements, nil
 }
 
-// Graph stores module-path edges. Versions shown in paths are the MVS-selected
-// versions from go list, not necessarily the lower requirement printed by
-// go mod graph.
-// Graph stores selected module dependency edges and can explain paths from the main module.
+// Graph stores selected module dependency edges and manifest requirements.
+// Versions shown in paths are the MVS-selected versions from go list, while
+// ModuleRequirement keeps the lower version a selected parent may have declared.
 type Graph struct {
-	adj      map[string][]string
-	selected map[string]string
-	roots    []string
+	adj          map[string][]string
+	requirements map[string][]model.ModuleRequirement
+	selected     map[string]string
+	roots        []string
 }
 
 // NewGraph creates an empty dependency graph using the supplied MVS-selected versions.
@@ -183,7 +221,7 @@ func NewGraph(selected map[string]string) *Graph {
 	for k, v := range selected {
 		copySelected[k] = v
 	}
-	return &Graph{adj: map[string][]string{}, selected: copySelected}
+	return &Graph{adj: map[string][]string{}, requirements: map[string][]model.ModuleRequirement{}, selected: copySelected}
 }
 
 // ParseGraph parses go mod graph output into a selected-version dependency graph.
@@ -199,12 +237,42 @@ func ParseGraph(data []byte, selected map[string]string) *Graph {
 		if parent.Path == "" || child.Path == "" {
 			continue
 		}
+		selectedParent, ok := selected[parent.Path]
+		if !ok || selectedParent != parent.Version {
+			// go mod graph can contain requirements from versions that lost MVS.
+			// They are useful historical graph nodes, but they do not describe the
+			// go.mod of the selected parent and must not create active paths.
+			continue
+		}
+		selectedChild, childSelected := selected[child.Path]
+		if !childSelected {
+			continue
+		}
 		g.adj[parent.Path] = appendUnique(g.adj[parent.Path], child.Path)
+		g.requirements[parent.Path] = appendRequirement(g.requirements[parent.Path], model.ModuleRequirement{
+			Path: child.Path, Version: child.Version, SelectedVersion: selectedChild,
+		})
 	}
 	for k := range g.adj {
 		sort.Strings(g.adj[k])
 	}
+	for k := range g.requirements {
+		sort.Slice(g.requirements[k], func(i, j int) bool {
+			if g.requirements[k][i].Path != g.requirements[k][j].Path {
+				return g.requirements[k][i].Path < g.requirements[k][j].Path
+			}
+			return g.requirements[k][i].Version < g.requirements[k][j].Version
+		})
+	}
 	return g
+}
+
+// RequirementsFrom returns requirements declared by the selected version of parent.
+// The requested version comes from the dependency manifest while SelectedVersion
+// records the version that won Go's module version selection.
+func (g *Graph) RequirementsFrom(parent string) []model.ModuleRequirement {
+	reqs := g.requirements[parent]
+	return append([]model.ModuleRequirement(nil), reqs...)
 }
 
 // AddRoot registers a module path as a graph traversal root.
@@ -267,6 +335,15 @@ func (g *Graph) PathsTo(target string, limit int) [][]model.ModuleRef {
 		}
 	}
 	return results
+}
+
+func appendRequirement(in []model.ModuleRequirement, v model.ModuleRequirement) []model.ModuleRequirement {
+	for _, existing := range in {
+		if existing.Path == v.Path && existing.Version == v.Version && existing.SelectedVersion == v.SelectedVersion {
+			return in
+		}
+	}
+	return append(in, v)
 }
 
 func appendUnique(in []string, v string) []string {

@@ -79,6 +79,7 @@ func (s *Scanner) Scan(ctx context.Context, dir string, opts Options) (*model.Re
 		return nil, err
 	}
 	report := &model.Report{Root: deps.Root, ToolVersion: s.ToolVersion, Module: deps.MainModule, ScannedAt: s.now().UTC()}
+	report.Warnings = append(report.Warnings, deps.Warnings...)
 
 	moduleByKey := map[string]model.Module{}
 	var targets []osv.Target
@@ -86,7 +87,13 @@ func (s *Scanner) Scan(ctx context.Context, dir string, opts Options) (*model.Re
 		if m.Main {
 			continue
 		}
+		report.Dependencies = append(report.Dependencies, m)
 		report.Summary.Modules++
+		if m.ManifestAudited {
+			report.Summary.Manifests++
+		} else {
+			report.Summary.ManifestErrors++
+		}
 		switch m.Kind {
 		case model.DependencyDirect:
 			report.Summary.Direct++
@@ -158,6 +165,9 @@ func (s *Scanner) Scan(ctx context.Context, dir string, opts Options) (*model.Re
 		}
 	}
 
+	sort.SliceStable(report.Dependencies, func(i, j int) bool {
+		return report.Dependencies[i].Path < report.Dependencies[j].Path
+	})
 	sortFindings(report.Findings)
 	sortFindings(report.IgnoredFindings)
 	report.Warnings = uniqueSorted(report.Warnings)

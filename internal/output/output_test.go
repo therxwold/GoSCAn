@@ -12,7 +12,14 @@ func sampleReport() *model.Report {
 	return &model.Report{
 		ToolVersion: "0.1.0",
 		Module:      "example.com/app",
-		Summary:     model.Summary{Modules: 1, Transitive: 1, High: 1},
+		Summary:     model.Summary{Modules: 2, Direct: 1, Transitive: 1, High: 1},
+		Dependencies: []model.Module{
+			{
+				Path: "example.com/parent", Version: "v1.0.0", Kind: model.DependencyDirect, GoVersion: "1.22", ManifestAudited: true,
+				Requires: []model.ModuleRequirement{{Path: "golang.org/x/net", Version: "v0.18.0", SelectedVersion: "v0.20.0"}},
+			},
+			{Path: "golang.org/x/net", Version: "v0.20.0", Kind: model.DependencyTransitive, GoVersion: "1.18", ManifestAudited: true},
+		},
 		Findings: []model.Finding{
 			{
 				Module: model.Module{Path: "golang.org/x/net", Version: "v0.20.0", Kind: model.DependencyTransitive},
@@ -41,7 +48,7 @@ func TestTerminalContainsGoModRecommendation(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := b.String()
-	for _, want := range []string{"TRANSITIVE", "go.mod recommendation", "// indirect", "EPSS", "CWE-400", "github", "CISA KEV"} {
+	for _, want := range []string{"TRANSITIVE", "go.mod recommendation", "// indirect", "EPSS", "CWE-400", "github", "CISA KEV", "Declared by", "example.com/parent@v1.0.0 requires golang.org/x/net@v0.18.0 (selected v0.20.0)"} {
 		if !strings.Contains(strings.ToUpper(s), strings.ToUpper(want)) {
 			t.Fatalf("missing %q in %s", want, s)
 		}
@@ -55,6 +62,30 @@ func TestJSON(t *testing.T) {
 	}
 	if !strings.Contains(b.String(), `"tool_version": "0.1.0"`) {
 		t.Fatal(b.String())
+	}
+}
+
+func TestTerminalCanShowDependencyManifests(t *testing.T) {
+	var b bytes.Buffer
+	if err := Write(&b, sampleReport(), FormatTerminal, WriteOptions{ShowManifests: true}); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Dependency manifests:", "example.com/parent@v1.0.0 (direct, go 1.22)", "requires golang.org/x/net@v0.18.0 -> selected v0.20.0"} {
+		if !strings.Contains(b.String(), want) {
+			t.Fatalf("missing %q in %s", want, b.String())
+		}
+	}
+}
+
+func TestJSONIncludesDependencyManifests(t *testing.T) {
+	var b bytes.Buffer
+	if err := Write(&b, sampleReport(), FormatJSON); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"dependencies"`, `"go_version": "1.22"`, `"selected_version": "v0.20.0"`} {
+		if !strings.Contains(b.String(), want) {
+			t.Fatalf("missing %s in %s", want, b.String())
+		}
 	}
 }
 

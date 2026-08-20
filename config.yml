@@ -22,6 +22,7 @@ ignore:
 scan:
   fail_on: "none"
   epss_threshold: -1
+  show_manifests: false
   timeout: "2m"
 
 fix:

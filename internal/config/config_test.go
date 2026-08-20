@@ -25,6 +25,7 @@ ignore:
 scan:
   fail_on: "high"
   epss_threshold: 0.2
+  show_manifests: true
   timeout: "45s"
 fix:
   run_tests: false
@@ -45,7 +46,7 @@ output:
 	if cfg.EPSS.Enabled || !cfg.Ignore.Show || len(cfg.Ignore.Rules) != 2 || cfg.Ignore.Rules["GO-2026-1234"] != "not reachable in our build" {
 		t.Fatalf("unexpected ignore config: %#v", cfg.Ignore)
 	}
-	if cfg.Scan.FailOn != "high" || cfg.Scan.EPSSThreshold != 0.2 || cfg.Scan.Timeout != 45*time.Second {
+	if cfg.Scan.FailOn != "high" || cfg.Scan.EPSSThreshold != 0.2 || !cfg.Scan.ShowManifests || cfg.Scan.Timeout != 45*time.Second {
 		t.Fatalf("unexpected scan config: %#v", cfg)
 	}
 	if cfg.Fix.RunTests || cfg.Fix.Timeout != 3*time.Minute || cfg.Output.Format != "json" {

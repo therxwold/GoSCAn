@@ -54,16 +54,29 @@ type ModuleRef struct {
 	Version string `json:"version,omitempty"`
 }
 
+// ModuleRequirement describes one requirement declared by a selected module's go.mod.
+// Version is the version requested by that module; SelectedVersion is the version
+// actually chosen for the build list by Go's module version selection.
+type ModuleRequirement struct {
+	Path            string `json:"path"`
+	Version         string `json:"version,omitempty"`
+	SelectedVersion string `json:"selected_version,omitempty"`
+	Indirect        bool   `json:"indirect,omitempty"`
+}
+
 // Module describes one module in the selected Go build list.
 type Module struct {
-	Path                string         `json:"path"`
-	Version             string         `json:"version,omitempty"`
-	Kind                DependencyKind `json:"kind"`
-	Main                bool           `json:"main,omitempty"`
-	Explicit            bool           `json:"explicit,omitempty"`
-	IndirectRequirement bool           `json:"indirect_requirement,omitempty"`
-	Replace             *ModuleRef     `json:"replace,omitempty"`
-	LocalReplacement    bool           `json:"local_replacement,omitempty"`
+	Path                string              `json:"path"`
+	Version             string              `json:"version,omitempty"`
+	Kind                DependencyKind      `json:"kind"`
+	Main                bool                `json:"main,omitempty"`
+	Explicit            bool                `json:"explicit,omitempty"`
+	IndirectRequirement bool                `json:"indirect_requirement,omitempty"`
+	GoVersion           string              `json:"go_version,omitempty"`
+	ManifestAudited     bool                `json:"manifest_audited"`
+	Requires            []ModuleRequirement `json:"requires,omitempty"`
+	Replace             *ModuleRef          `json:"replace,omitempty"`
+	LocalReplacement    bool                `json:"local_replacement,omitempty"`
 }
 
 // ScanTarget returns the registry module path and version that represent the code actually selected.
@@ -169,11 +182,13 @@ type Finding struct {
 
 // Summary contains dependency and vulnerability counts for a scan.
 type Summary struct {
-	Modules    int `json:"modules"`
-	Direct     int `json:"direct"`
-	Indirect   int `json:"indirect"`
-	Transitive int `json:"transitive"`
-	Skipped    int `json:"skipped"`
+	Modules        int `json:"modules"`
+	Direct         int `json:"direct"`
+	Indirect       int `json:"indirect"`
+	Transitive     int `json:"transitive"`
+	Skipped        int `json:"skipped"`
+	Manifests      int `json:"manifests"`
+	ManifestErrors int `json:"manifest_errors"`
 
 	Critical int `json:"critical"`
 	High     int `json:"high"`
@@ -190,6 +205,7 @@ type Report struct {
 	Module          string    `json:"module"`
 	ScannedAt       time.Time `json:"scanned_at"`
 	Summary         Summary   `json:"summary"`
+	Dependencies    []Module  `json:"dependencies,omitempty"`
 	Findings        []Finding `json:"findings"`
 	IgnoredFindings []Finding `json:"ignored_findings,omitempty"`
 	Warnings        []string  `json:"warnings,omitempty"`

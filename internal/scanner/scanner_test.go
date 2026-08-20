@@ -47,15 +47,27 @@ func TestScanIncludesTransitiveAndRecommendsGoModPin(t *testing.T) {
 	g.AddRoot("example.com/app")
 	s := &Scanner{Dependencies: fakeDeps{&dependency.Result{Root: "/x", MainModule: "example.com/app", Modules: []model.Module{
 		{Path: "example.com/app", Main: true, Kind: model.DependencyMain},
-		{Path: "example.com/direct", Version: "v1.0.0", Kind: model.DependencyDirect},
-		{Path: "example.com/deep", Version: "v1.2.0", Kind: model.DependencyTransitive},
+		{Path: "example.com/direct", Version: "v1.0.0", Kind: model.DependencyDirect, GoVersion: "1.22", ManifestAudited: true, Requires: []model.ModuleRequirement{{Path: "example.com/deep", Version: "v1.1.0", SelectedVersion: "v1.2.0"}}},
+		{Path: "example.com/deep", Version: "v1.2.0", Kind: model.DependencyTransitive, ManifestAudited: true},
 	}, Graph: g}}, Vulnerabilities: fakeVulns{}, EPSS: fakeEPSS{}, Versions: fakeLatest{}, Now: func() time.Time { return time.Unix(0, 0) }}
 	r, err := s.Scan(context.Background(), ".", Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Summary.Modules != 2 || r.Summary.Transitive != 1 {
+	if r.Summary.Modules != 2 || r.Summary.Transitive != 1 || r.Summary.Manifests != 2 || r.Summary.ManifestErrors != 0 {
 		t.Fatalf("summary=%+v", r.Summary)
+	}
+	if len(r.Dependencies) != 2 {
+		t.Fatalf("dependency manifests=%+v", r.Dependencies)
+	}
+	var direct *model.Module
+	for i := range r.Dependencies {
+		if r.Dependencies[i].Path == "example.com/direct" {
+			direct = &r.Dependencies[i]
+		}
+	}
+	if direct == nil || len(direct.Requires) != 1 || direct.Requires[0].Path != "example.com/deep" {
+		t.Fatalf("dependency manifests=%+v", r.Dependencies)
 	}
 	if len(r.Findings) != 1 {
 		t.Fatalf("findings=%d", len(r.Findings))

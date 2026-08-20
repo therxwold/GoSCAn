@@ -37,7 +37,8 @@ func ParseFormat(v string) (Format, error) {
 
 // WriteOptions controls optional presentation of a report.
 type WriteOptions struct {
-	ShowIgnored bool
+	ShowIgnored   bool
+	ShowManifests bool
 }
 
 // Write renders report in the requested output format.
@@ -70,6 +71,11 @@ func writeTerminal(w io.Writer, r *model.Report, opts WriteOptions) error {
 		fmt.Fprintf(w, ", %d skipped", r.Summary.Skipped)
 	}
 	fmt.Fprintln(w, ")")
+	fmt.Fprintf(w, "Manifests: %d/%d dependency go.mod files inspected", r.Summary.Manifests, r.Summary.Modules)
+	if r.Summary.ManifestErrors > 0 {
+		fmt.Fprintf(w, " (%d unavailable)", r.Summary.ManifestErrors)
+	}
+	fmt.Fprintln(w)
 	fmt.Fprintf(w, "Vulnerabilities: %d critical, %d high, %d medium, %d low, %d unknown", r.Summary.Critical, r.Summary.High, r.Summary.Medium, r.Summary.Low, r.Summary.Unknown)
 	if r.Summary.Ignored > 0 {
 		fmt.Fprintf(w, " (%d ignored)", r.Summary.Ignored)
@@ -79,6 +85,9 @@ func writeTerminal(w io.Writer, r *model.Report, opts WriteOptions) error {
 		fmt.Fprintln(w, "\nNo active known vulnerabilities found.")
 		if opts.ShowIgnored {
 			writeIgnored(w, r.IgnoredFindings)
+		}
+		if opts.ShowManifests {
+			writeManifests(w, r.Dependencies)
 		}
 		writeWarnings(w, r)
 		return nil
@@ -143,6 +152,16 @@ func writeTerminal(w io.Writer, r *model.Report, opts WriteOptions) error {
 				fmt.Fprintln(w, prefix+label)
 			}
 		}
+		if origins := requirementOrigins(r.Dependencies, f.Module.Path); len(origins) > 0 {
+			fmt.Fprintln(w, "  Declared by:")
+			for _, origin := range origins {
+				fmt.Fprintf(w, "    %s@%s requires %s@%s", origin.parent.Path, origin.parent.Version, f.Module.Path, origin.requirement.Version)
+				if origin.requirement.SelectedVersion != "" && origin.requirement.SelectedVersion != origin.requirement.Version {
+					fmt.Fprintf(w, " (selected %s)", origin.requirement.SelectedVersion)
+				}
+				fmt.Fprintln(w)
+			}
+		}
 		if f.Fix != nil {
 			fmt.Fprintf(w, "  Fix:      %s\n", f.Fix.Command)
 			if f.Fix.GoModChange != nil {
@@ -154,8 +173,70 @@ func writeTerminal(w io.Writer, r *model.Report, opts WriteOptions) error {
 	if opts.ShowIgnored {
 		writeIgnored(w, r.IgnoredFindings)
 	}
+	if opts.ShowManifests {
+		writeManifests(w, r.Dependencies)
+	}
 	writeWarnings(w, r)
 	return nil
+}
+
+type requirementOrigin struct {
+	parent      model.ModuleRef
+	requirement model.ModuleRequirement
+}
+
+func requirementOrigins(modules []model.Module, target string) []requirementOrigin {
+	var out []requirementOrigin
+	for _, module := range modules {
+		for _, requirement := range module.Requires {
+			if requirement.Path != target {
+				continue
+			}
+			out = append(out, requirementOrigin{
+				parent:      model.ModuleRef{Path: module.Path, Version: module.Version},
+				requirement: requirement,
+			})
+		}
+	}
+	return out
+}
+
+func writeManifests(w io.Writer, modules []model.Module) {
+	if len(modules) == 0 {
+		return
+	}
+	fmt.Fprintln(w, "\nDependency manifests:")
+	for _, module := range modules {
+		fmt.Fprintf(w, "  %s@%s (%s", module.Path, module.Version, module.Kind)
+		if module.GoVersion != "" {
+			fmt.Fprintf(w, ", go %s", module.GoVersion)
+		}
+		if !module.ManifestAudited {
+			fmt.Fprint(w, ", manifest audit unavailable")
+		}
+		fmt.Fprintln(w, ")")
+		if len(module.Requires) == 0 {
+			if module.ManifestAudited {
+				fmt.Fprintln(w, "    requires: none")
+			} else {
+				fmt.Fprintln(w, "    requires: no complete manifest data")
+			}
+			continue
+		}
+		for _, requirement := range module.Requires {
+			fmt.Fprintf(w, "    requires %s@%s", requirement.Path, requirement.Version)
+			if requirement.Indirect {
+				fmt.Fprint(w, " (indirect)")
+			}
+			switch {
+			case requirement.SelectedVersion == "":
+				fmt.Fprint(w, " -> not selected")
+			case requirement.SelectedVersion != requirement.Version:
+				fmt.Fprintf(w, " -> selected %s", requirement.SelectedVersion)
+			}
+			fmt.Fprintln(w)
+		}
+	}
 }
 
 func writeIgnored(w io.Writer, findings []model.Finding) {

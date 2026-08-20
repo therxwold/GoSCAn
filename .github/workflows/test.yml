@@ -39,4 +39,5 @@ jobs:
           no-github: "true"
           no-nvd: "true"
           no-epss: "true"
+          show-manifests: "true"
           format: terminal

@@ -70,6 +70,7 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 	noNVD := fs.Bool("no-nvd", false, "disable NVD enrichment")
 	noEPSS := fs.Bool("no-epss", !cfg.EPSS.Enabled, "disable FIRST EPSS enrichment")
 	showIgnored := fs.Bool("show-ignored", cfg.Ignore.Show, "show findings suppressed as false positives")
+	showManifests := fs.Bool("show-manifests", cfg.Scan.ShowManifests, "show requirements declared by selected dependency manifests")
 	fs.Func("ignore", "ignore advisory ID or module@ID; append =reason if wanted; repeatable", func(value string) error {
 		return addIgnoreRule(ignoreRules, value)
 	})
@@ -134,7 +135,7 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "goscan:", err)
 		return 2
 	}
-	if err := output.Write(stdout, report, format, output.WriteOptions{ShowIgnored: *showIgnored}); err != nil {
+	if err := output.Write(stdout, report, format, output.WriteOptions{ShowIgnored: *showIgnored, ShowManifests: *showManifests}); err != nil {
 		fmt.Fprintln(stderr, "goscan:", err)
 		return 2
 	}
@@ -168,6 +169,7 @@ func runFix(args []string, stdout, stderr io.Writer) int {
 	noNVD := fs.Bool("no-nvd", false, "disable NVD enrichment")
 	noEPSS := fs.Bool("no-epss", !cfg.EPSS.Enabled, "disable FIRST EPSS enrichment")
 	showIgnored := fs.Bool("show-ignored", cfg.Ignore.Show, "show findings suppressed as false positives")
+	showManifests := fs.Bool("show-manifests", cfg.Scan.ShowManifests, "show requirements declared by selected dependency manifests")
 	fs.Func("ignore", "ignore advisory ID or module@ID; append =reason if wanted; repeatable", func(value string) error {
 		return addIgnoreRule(ignoreRules, value)
 	})
@@ -223,7 +225,7 @@ func runFix(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	if !*apply || len(report.Findings) == 0 {
-		if err := output.Write(stdout, report, format, output.WriteOptions{ShowIgnored: *showIgnored}); err != nil {
+		if err := output.Write(stdout, report, format, output.WriteOptions{ShowIgnored: *showIgnored, ShowManifests: *showManifests}); err != nil {
 			fmt.Fprintln(stderr, err)
 			return 2
 		}
@@ -240,7 +242,7 @@ func runFix(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "goscan rescan:", err)
 		return 2
 	}
-	if err := output.Write(stdout, post, format, output.WriteOptions{ShowIgnored: *showIgnored}); err != nil {
+	if err := output.Write(stdout, post, format, output.WriteOptions{ShowIgnored: *showIgnored, ShowManifests: *showManifests}); err != nil {
 		fmt.Fprintln(stderr, err)
 		return 2
 	}
@@ -285,9 +287,10 @@ Usage:
   goscan -v
 
 Scan every selected direct, indirect, and transitive Go module using OSV,
-enrich advisories with GitHub, NVD, and EPSS data, and recommend the first
-fixed version. Transitive fixes include an explicit go.mod // indirect pin when
-Go MVS can select the fixed version from the main module.
+enrich advisories with GitHub, NVD, and EPSS data, inspect requirements from
+each selected dependency manifest, and recommend the first fixed version.
+Transitive fixes include an explicit go.mod // indirect pin when Go MVS can
+select the fixed version from the main module.
 
 Examples:
   goscan
@@ -296,6 +299,7 @@ Examples:
   goscan scan --no-nvd --no-github
   goscan scan --ignore GO-2026-1234
   goscan scan --show-ignored
+  goscan scan --show-manifests
   goscan scan --config=config.yml
   goscan scan --format=sarif > goscan.sarif
   goscan fix

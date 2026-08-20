@@ -49,6 +49,7 @@ type IgnoreConfig struct {
 type ScanConfig struct {
 	FailOn        string
 	EPSSThreshold float64
+	ShowManifests bool
 	Timeout       time.Duration
 }
 
@@ -79,6 +80,7 @@ type fileConfig struct {
 	Scan   *struct {
 		FailOn        *string  `yaml:"fail_on"`
 		EPSSThreshold *float64 `yaml:"epss_threshold"`
+		ShowManifests *bool    `yaml:"show_manifests"`
 		Timeout       *string  `yaml:"timeout"`
 	} `yaml:"scan"`
 	Fix *struct {
@@ -217,6 +219,9 @@ func mergeFileConfig(cfg *Config, raw fileConfig) error {
 		}
 		if raw.Scan.EPSSThreshold != nil {
 			cfg.Scan.EPSSThreshold = *raw.Scan.EPSSThreshold
+		}
+		if raw.Scan.ShowManifests != nil {
+			cfg.Scan.ShowManifests = *raw.Scan.ShowManifests
 		}
 		if raw.Scan.Timeout != nil {
 			v, err := time.ParseDuration(*raw.Scan.Timeout)

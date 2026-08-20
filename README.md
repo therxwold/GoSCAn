@@ -2,13 +2,15 @@
 
 GoSCAn is a Go dependency vulnerability scanner and remediation planner. It scans the complete module build list selected by Go MVS, including direct requirements, explicit `// indirect` requirements, and deeper transitive modules.
 
-Its job is not only to say that a dependency is vulnerable. It also explains why that dependency is in the graph, finds the first fixed version, resolves the current latest version, cross-checks advisories with GitHub and NVD, enriches CVEs with EPSS exploitation probability, and proposes the smallest useful `go.mod` repair.
+Its job is not only to say that a dependency is vulnerable. It also explains why that dependency is in the graph, audits requirements declared by selected dependency manifests, finds the first fixed version, resolves the current latest version, cross-checks advisories with GitHub and NVD, enriches CVEs with EPSS exploitation probability, and proposes the smallest useful `go.mod` repair.
 
 ## What it does
 
 - Scans **every versioned module selected by `go list -m -json all`**.
 - Classifies modules as `direct`, `indirect`, or `transitive` for reporting.
 - Builds dependency paths from `go mod graph`.
+- Audits every selected dependency's actual `go.mod` with `golang.org/x/mod/modfile`, including the dependency's Go version, requested module version, `// indirect` state, and the version actually selected by MVS.
+- Keeps manifest requirements separate from the active `go mod graph`, so pruned or stale declarations cannot invent active dependency paths.
 - Queries OSV using the Go ecosystem and the exact selected module version.
 - Cross-checks OSV findings against reviewed GitHub Advisory Database records.
 - Enriches CVEs with NVD metadata, CVSS, CWE references, and CISA KEV status when available.
@@ -98,12 +100,34 @@ HIGH  GO-2026-XXXX
     example.com/app
     └── github.com/example/parent@v1.8.0
     └── golang.org/x/net@v0.20.0
+  Declared by:
+    github.com/example/parent@v1.8.0 requires golang.org/x/net@v0.18.0 (selected v0.20.0)
   Fix:      go get golang.org/x/net@v0.25.0
   go.mod recommendation:
     + require golang.org/x/net v0.25.0 // indirect
 ```
 
 The explicit transitive pin works with Go MVS by raising the minimum selected version in the main module. GoSCAn recommends the **first fixed version**, not `@latest`, as the minimal security repair. The latest version is shown separately so the developer can choose a larger upgrade deliberately.
+
+### Dependency manifest audit
+
+GoSCAn keeps the requested versions declared by selected dependency manifests separate from the versions actually selected by MVS. Show the complete manifest view with:
+
+```bash
+goscan scan --show-manifests
+```
+
+Example:
+
+```text
+Dependency manifests:
+  github.com/example/parent@v1.8.0 (direct, go 1.22)
+    requires golang.org/x/net@v0.18.0 -> selected v0.20.0
+  golang.org/x/net@v0.20.0 (transitive, go 1.20)
+    requires: none
+```
+
+The left-hand version is what the parent module declares. `selected` is the version Go actually builds. A vulnerable lower version mentioned by a dependency does **not** become an active finding when MVS has already selected a safe higher version. The declaration is retained as provenance and remediation context instead of being promoted into a false positive. JSON always includes this dependency manifest metadata under `dependencies`; `--show-manifests` controls the extra terminal output.
 
 
 ## Configuration
@@ -138,6 +162,7 @@ ignore:
 scan:
   fail_on: "none"
   epss_threshold: -1
+  show_manifests: false
   timeout: "2m"
 
 fix:
@@ -336,7 +361,7 @@ goscan scan --fail-on=high --epss-threshold=0.10
 ```text
 cmd/goscan
     |
-    +-- dependency      go env / go list / go mod graph
+    +-- dependency      selected build list + go.mod manifest audit + graph paths
     +-- config          config.yml + environment defaults
     +-- osv             OSV batch scan + advisory detail grouping
     +-- githubadvisory  GitHub reviewed advisory enrichment
@@ -360,7 +385,7 @@ go vet ./...
 make build
 ```
 
-The test suite is written and maintained by **Eluuna**. It is deliberately strict around the parts most likely to lie: dependency classification and graph paths, local module-graph integration, OSV alias grouping/pagination/fixed-version selection, GitHub/NVD enrichment, config precedence, false-positive suppression and module scoping, EPSS parsing, CVSS 2.0/3.x/4.0 scoring, version resolution, terminal/JSON/SARIF output, CI severity/EPSS policy evaluation, and remediation planning.
+The test suite is written and maintained by **Eluuna**. It is deliberately strict around the parts most likely to lie: dependency classification and graph paths, selected-parent manifest requirements, requested-vs-selected versions, local module-graph integration, OSV alias grouping/pagination/fixed-version selection, GitHub/NVD enrichment, config precedence, false-positive suppression and module scoping, EPSS parsing, CVSS 2.0/3.x/4.0 scoring, version resolution, terminal/JSON/SARIF output, CI severity/EPSS policy evaluation, and remediation planning.
 
 Fix application tests verify the successful `go get` -> `go mod tidy` -> `go test ./...` sequence, highest-fixed-version deduplication, optional test skipping, replacement safety, rollback on `go get` failure, rollback on `go mod tidy` failure, rollback on test failure, restoration of both `go.mod` and `go.sum`, and removal of a newly created `go.sum` during rollback.
 
@@ -368,7 +393,9 @@ The GitHub Actions workflow also contains an `action-smoke` job that invokes the
 
 ## Data sources and Go semantics
 
-GoSCAn intentionally delegates module selection to the Go command instead of reimplementing Minimal Version Selection. `go list -m -json all` is treated as the authoritative selected build list and `go mod graph` is used to explain dependency ancestry.
+GoSCAn intentionally delegates module selection to the Go command instead of reimplementing Minimal Version Selection. `go list -m -json all` is treated as the authoritative selected build list and provides each selected module's `go.mod` location and Go-version metadata. GoSCAn then reads each selected manifest with `golang.org/x/mod/modfile`, the Go project's dedicated `go.mod` parser. This is intentionally separate from `go mod graph`, because Go 1.17+ module graph pruning can omit requirements that still exist in a dependency's manifest.
+
+`go mod graph` remains the source for active ancestry. GoSCAn only accepts graph edges from the selected version of each parent module, so an older parent version that lost MVS cannot invent an active dependency path. Manifest requirements are audit/provenance data, not a second vulnerability truth source. If a dependency declares `example.com/lib v1.0.0` but MVS selects `v1.4.0`, GoSCAn scans `v1.4.0` for active vulnerabilities while retaining the `v1.0.0 -> selected v1.4.0` declaration for explanation and future fix planning.
 
 OSV and the Go Vulnerability Database remain the primary package/version matching source. GitHub's reviewed Advisory Database is used to cross-check and enrich identified advisories, while NVD supplies CVE-centric metadata such as CVSS, CWE, references, and CISA KEV status. EPSS enrichment comes directly from FIRST and is only available when an advisory has a CVE identifier.
 

@@ -25,19 +25,41 @@ func (f fakeRunner) Run(_ context.Context, _ string, name string, args ...string
 func TestLoaderClassifiesEverySelectedModule(t *testing.T) {
 	dir := t.TempDir()
 	mainMod := filepath.Join(dir, "go.mod")
-	if err := os.WriteFile(mainMod, []byte(`module example.com/app
+	directMod := filepath.Join(dir, "direct.mod")
+	indirectMod := filepath.Join(dir, "indirect.mod")
+	deepMod := filepath.Join(dir, "deep.mod")
+
+	for path, body := range map[string]string{
+		mainMod: `module example.com/app
+
+go 1.26
 
 require (
 	example.com/direct v1.0.0
 	example.com/indirect v1.0.0 // indirect
 )
-`), 0o644); err != nil {
-		t.Fatal(err)
+`,
+		directMod: `module example.com/direct
+
+go 1.22
+
+require (
+	example.com/deep v1.4.0
+	example.com/pruned v0.5.0 // indirect
+)
+`,
+		indirectMod: "module example.com/indirect\ngo 1.21\n",
+		deepMod:     "module example.com/deep\ngo 1.20\n",
+	} {
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
+
 	r := fakeRunner{
 		"go env GOMOD":         []byte(mainMod + "\n"),
-		"go list -m -json all": []byte("{\"Path\":\"example.com/app\",\"Main\":true}\n{\"Path\":\"example.com/direct\",\"Version\":\"v1.0.0\"}\n{\"Path\":\"example.com/indirect\",\"Version\":\"v1.0.0\"}\n{\"Path\":\"example.com/deep\",\"Version\":\"v2.0.0\"}\n"),
-		"go mod graph":         []byte("example.com/app example.com/direct@v1.0.0\nexample.com/direct@v1.0.0 example.com/deep@v2.0.0\nexample.com/app example.com/indirect@v1.0.0\n"),
+		"go list -m -json all": []byte(fmt.Sprintf("{\"Path\":\"example.com/app\",\"Main\":true,\"GoMod\":%q,\"GoVersion\":\"1.26\"}\n{\"Path\":\"example.com/direct\",\"Version\":\"v1.0.0\",\"GoMod\":%q,\"GoVersion\":\"1.22\"}\n{\"Path\":\"example.com/indirect\",\"Version\":\"v1.0.0\",\"GoMod\":%q,\"GoVersion\":\"1.21\"}\n{\"Path\":\"example.com/deep\",\"Version\":\"v2.0.0\",\"GoMod\":%q,\"GoVersion\":\"1.20\"}\n", mainMod, directMod, indirectMod, deepMod)),
+		"go mod graph":         []byte("example.com/app example.com/direct@v1.0.0\nexample.com/direct@v1.0.0 example.com/deep@v1.5.0\nexample.com/direct@v0.9.0 example.com/indirect@v1.0.0\nexample.com/app example.com/indirect@v1.0.0\n"),
 	}
 	res, err := (Loader{Runner: r}).Load(context.Background(), ".")
 	if err != nil {
@@ -57,8 +79,27 @@ require (
 		t.Fatalf("deep=%s", got["example.com/deep"])
 	}
 	paths := res.Graph.PathsTo("example.com/deep", 3)
-	if len(paths) != 1 || len(paths[0]) != 3 {
+	if len(paths) != 1 || len(paths[0]) != 3 || paths[0][2].Version != "v2.0.0" {
 		t.Fatalf("paths=%v", paths)
+	}
+
+	var direct model.Module
+	for _, module := range res.Modules {
+		if module.Path == "example.com/direct" {
+			direct = module
+		}
+	}
+	if direct.GoVersion != "1.22" || !direct.ManifestAudited {
+		t.Fatalf("manifest metadata=%+v", direct)
+	}
+	if len(direct.Requires) != 2 {
+		t.Fatalf("requirements=%+v", direct.Requires)
+	}
+	if direct.Requires[0].Path != "example.com/deep" || direct.Requires[0].Version != "v1.4.0" || direct.Requires[0].SelectedVersion != "v2.0.0" {
+		t.Fatalf("selected requirement=%+v", direct.Requires[0])
+	}
+	if direct.Requires[1].Path != "example.com/pruned" || direct.Requires[1].Version != "v0.5.0" || direct.Requires[1].SelectedVersion != "" || !direct.Requires[1].Indirect {
+		t.Fatalf("pruned requirement=%+v", direct.Requires[1])
 	}
 }
 
@@ -129,4 +170,14 @@ replace example.com/deep => ./deep
 	if len(paths) != 1 || len(paths[0]) != 3 {
 		t.Fatalf("paths=%v", paths)
 	}
+	for _, module := range res.Modules {
+		if module.Path != "example.com/direct" {
+			continue
+		}
+		if module.GoVersion != "1.23.0" || !module.ManifestAudited || len(module.Requires) != 1 || module.Requires[0].Path != "example.com/deep" {
+			t.Fatalf("manifest=%+v", module)
+		}
+		return
+	}
+	t.Fatal("direct module not found")
 }
