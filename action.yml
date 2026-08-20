@@ -14,6 +14,22 @@ inputs:
     description: Output format (terminal, json, sarif).
     required: false
     default: terminal
+  config:
+    description: Optional GoSCAn config.yml path relative to the repository root.
+    required: false
+    default: ""
+  nvd-api-key:
+    description: Optional NVD API key. Prefer passing this from a GitHub Actions secret.
+    required: false
+    default: ""
+  no-github:
+    description: Disable GitHub Advisory Database enrichment.
+    required: false
+    default: "false"
+  no-nvd:
+    description: Disable NVD enrichment.
+    required: false
+    default: "false"
   no-epss:
     description: Disable EPSS enrichment.
     required: false
@@ -38,13 +54,27 @@ runs:
     - name: Scan dependencies
       shell: bash
       env:
+        GOSCAN_GITHUB_TOKEN: ${{ github.token }}
+        GOSCAN_NVD_API_KEY: ${{ inputs.nvd-api-key }}
         GOSCAN_FAIL_ON: ${{ inputs.fail-on }}
         GOSCAN_EPSS_THRESHOLD: ${{ inputs.epss-threshold }}
         GOSCAN_FORMAT: ${{ inputs.format }}
+        GOSCAN_CONFIG: ${{ inputs.config }}
+        GOSCAN_NO_GITHUB: ${{ inputs.no-github }}
+        GOSCAN_NO_NVD: ${{ inputs.no-nvd }}
         GOSCAN_NO_EPSS: ${{ inputs.no-epss }}
       run: |
         set -euo pipefail
         args=(scan --fail-on "$GOSCAN_FAIL_ON" --epss-threshold "$GOSCAN_EPSS_THRESHOLD" --format "$GOSCAN_FORMAT")
+        if [[ -n "$GOSCAN_CONFIG" ]]; then
+          args+=(--config "$GOSCAN_CONFIG")
+        fi
+        if [[ "$GOSCAN_NO_GITHUB" == "true" ]]; then
+          args+=(--no-github)
+        fi
+        if [[ "$GOSCAN_NO_NVD" == "true" ]]; then
+          args+=(--no-nvd)
+        fi
         if [[ "$GOSCAN_NO_EPSS" == "true" ]]; then
           args+=(--no-epss)
         fi

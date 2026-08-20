@@ -7,9 +7,11 @@ import (
 	"io"
 	"os"
 	"strings"
-	"time"
 
+	"github.com/therxwold/GoSCAn/internal/config"
 	"github.com/therxwold/GoSCAn/internal/fixer"
+	"github.com/therxwold/GoSCAn/internal/githubadvisory"
+	"github.com/therxwold/GoSCAn/internal/nvd"
 	"github.com/therxwold/GoSCAn/internal/output"
 	"github.com/therxwold/GoSCAn/internal/scanner"
 )
@@ -43,14 +45,32 @@ func run(args []string, stdout, stderr io.Writer) int {
 }
 
 func runScan(args []string, stdout, stderr io.Writer) int {
+	configPath, configExplicit, err := config.PathFromArgs(args)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 2
+	}
+	cfg, err := config.Load(configPath, configExplicit)
+	if err != nil {
+		fmt.Fprintln(stderr, "goscan:", err)
+		return 2
+	}
+
 	fs := flag.NewFlagSet("goscan scan", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	formatName := fs.String("format", "terminal", "output format: terminal, json, sarif")
+	_ = fs.String("config", configPath, "configuration file (default config.yml when present)")
+	formatName := fs.String("format", cfg.Output.Format, "output format: terminal, json, sarif")
 	jsonAlias := fs.Bool("json", false, "alias for --format=json")
-	failOn := fs.String("fail-on", "none", "exit 1 at or above severity: none, low, medium, high, critical")
-	epssThreshold := fs.Float64("epss-threshold", -1, "exit 1 when EPSS probability is at least this value (0..1); -1 disables")
-	noEPSS := fs.Bool("no-epss", false, "disable FIRST EPSS enrichment")
-	timeout := fs.Duration("timeout", 2*time.Minute, "overall scan timeout")
+	failOn := fs.String("fail-on", cfg.Scan.FailOn, "exit 1 at or above severity: none, low, medium, high, critical")
+	epssThreshold := fs.Float64("epss-threshold", cfg.Scan.EPSSThreshold, "exit 1 when EPSS probability is at least this value (0..1); -1 disables")
+	githubEnabled := fs.Bool("github", cfg.GitHub.Enabled, "enable GitHub Advisory Database enrichment")
+	nvdEnabled := fs.Bool("nvd", cfg.NVD.Enabled, "enable NVD enrichment")
+	noGitHub := fs.Bool("no-github", false, "disable GitHub Advisory Database enrichment")
+	noNVD := fs.Bool("no-nvd", false, "disable NVD enrichment")
+	noEPSS := fs.Bool("no-epss", !cfg.EPSS.Enabled, "disable FIRST EPSS enrichment")
+	githubToken := fs.String("github-token", cfg.GitHub.Token, "GitHub token; environment variables are safer")
+	nvdAPIKey := fs.String("nvd-api-key", cfg.NVD.APIKey, "NVD API key; environment variables are safer")
+	timeout := fs.Duration("timeout", cfg.Scan.Timeout, "overall scan timeout")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -65,6 +85,12 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 	}
 	if *jsonAlias {
 		*formatName = "json"
+	}
+	if *noGitHub {
+		*githubEnabled = false
+	}
+	if *noNVD {
+		*nvdEnabled = false
 	}
 
 	format, err := output.ParseFormat(*formatName)
@@ -87,7 +113,9 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 
 	s := scanner.New()
 	s.ToolVersion = strings.TrimPrefix(Version, "v")
-	report, err := s.Scan(ctx, dir, scanner.Options{NoEPSS: *noEPSS})
+	s.GitHub = githubadvisory.Client{Token: *githubToken}
+	s.NVD = nvd.Client{APIKey: *nvdAPIKey}
+	report, err := s.Scan(ctx, dir, scanner.Options{NoGitHub: !*githubEnabled, NoNVD: !*nvdEnabled, NoEPSS: *noEPSS})
 	if err != nil {
 		fmt.Fprintln(stderr, "goscan:", err)
 		return 2
@@ -103,13 +131,31 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 }
 
 func runFix(args []string, stdout, stderr io.Writer) int {
+	configPath, configExplicit, err := config.PathFromArgs(args)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 2
+	}
+	cfg, err := config.Load(configPath, configExplicit)
+	if err != nil {
+		fmt.Fprintln(stderr, "goscan:", err)
+		return 2
+	}
+
 	fs := flag.NewFlagSet("goscan fix", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	_ = fs.String("config", configPath, "configuration file (default config.yml when present)")
 	apply := fs.Bool("apply", false, "apply all available first-fixed-version recommendations")
-	runTests := fs.Bool("test", true, "run go test ./... after applying fixes")
-	noEPSS := fs.Bool("no-epss", false, "disable FIRST EPSS enrichment")
-	formatName := fs.String("format", "terminal", "output format: terminal, json, sarif")
-	timeout := fs.Duration("timeout", 5*time.Minute, "overall fix/verification timeout")
+	runTests := fs.Bool("test", cfg.Fix.RunTests, "run go test ./... after applying fixes")
+	githubEnabled := fs.Bool("github", cfg.GitHub.Enabled, "enable GitHub Advisory Database enrichment")
+	nvdEnabled := fs.Bool("nvd", cfg.NVD.Enabled, "enable NVD enrichment")
+	noGitHub := fs.Bool("no-github", false, "disable GitHub Advisory Database enrichment")
+	noNVD := fs.Bool("no-nvd", false, "disable NVD enrichment")
+	noEPSS := fs.Bool("no-epss", !cfg.EPSS.Enabled, "disable FIRST EPSS enrichment")
+	githubToken := fs.String("github-token", cfg.GitHub.Token, "GitHub token; environment variables are safer")
+	nvdAPIKey := fs.String("nvd-api-key", cfg.NVD.APIKey, "NVD API key; environment variables are safer")
+	formatName := fs.String("format", cfg.Output.Format, "output format: terminal, json, sarif")
+	timeout := fs.Duration("timeout", cfg.Fix.Timeout, "overall fix/verification timeout")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -121,6 +167,12 @@ func runFix(args []string, stdout, stderr io.Writer) int {
 	dir := "."
 	if fs.NArg() == 1 {
 		dir = fs.Arg(0)
+	}
+	if *noGitHub {
+		*githubEnabled = false
+	}
+	if *noNVD {
+		*nvdEnabled = false
 	}
 
 	format, err := output.ParseFormat(*formatName)
@@ -134,7 +186,10 @@ func runFix(args []string, stdout, stderr io.Writer) int {
 
 	s := scanner.New()
 	s.ToolVersion = strings.TrimPrefix(Version, "v")
-	report, err := s.Scan(ctx, dir, scanner.Options{NoEPSS: *noEPSS})
+	s.GitHub = githubadvisory.Client{Token: *githubToken}
+	s.NVD = nvd.Client{APIKey: *nvdAPIKey}
+	opts := scanner.Options{NoGitHub: !*githubEnabled, NoNVD: !*nvdEnabled, NoEPSS: *noEPSS}
+	report, err := s.Scan(ctx, dir, opts)
 	if err != nil {
 		fmt.Fprintln(stderr, "goscan:", err)
 		return 2
@@ -152,7 +207,7 @@ func runFix(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	fmt.Fprintln(stderr, "goscan: fixes applied; rescanning")
-	post, err := s.Scan(ctx, dir, scanner.Options{NoEPSS: *noEPSS})
+	post, err := s.Scan(ctx, dir, opts)
 	if err != nil {
 		fmt.Fprintln(stderr, "goscan rescan:", err)
 		return 2
@@ -177,14 +232,16 @@ Usage:
   goscan -v
 
 Scan every selected direct, indirect, and transitive Go module using OSV,
-enrich CVEs with EPSS, and recommend the first fixed version. Transitive fixes
-include an explicit go.mod // indirect pin when Go MVS can select the fixed
-version from the main module.
+enrich advisories with GitHub, NVD, and EPSS data, and recommend the first
+fixed version. Transitive fixes include an explicit go.mod // indirect pin when
+Go MVS can select the fixed version from the main module.
 
 Examples:
   goscan
   goscan scan --fail-on=high
   goscan scan --format=json
+  goscan scan --no-nvd --no-github
+  goscan scan --config=config.yml
   goscan scan --format=sarif > goscan.sarif
   goscan fix
   goscan fix --apply`)

@@ -25,7 +25,7 @@ jobs:
       - run: ./bin/goscan -v
       - run: ./bin/goscan --version
       - run: ./bin/goscan version
-      - run: ./bin/goscan scan --no-epss .
+      - run: ./bin/goscan scan --no-github --no-nvd --no-epss .
 
   action-smoke:
     name: GitHub Action smoke test
@@ -36,5 +36,7 @@ jobs:
         uses: ./
         with:
           fail-on: none
+          no-github: "true"
+          no-nvd: "true"
           no-epss: "true"
           format: terminal
