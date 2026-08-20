@@ -1,0 +1,25 @@
+# GoSCAn configuration. CLI flags override these values.
+# Tokens may be written here, but environment variables are safer for CI and shared repositories.
+
+github:
+  enabled: true
+  token: "${GOSCAN_GITHUB_TOKEN}"
+
+nvd:
+  enabled: true
+  api_key: "${GOSCAN_NVD_API_KEY}"
+
+epss:
+  enabled: true
+
+scan:
+  fail_on: "none"
+  epss_threshold: -1
+  timeout: "2m"
+
+fix:
+  run_tests: true
+  timeout: "5m"
+
+output:
+  format: "terminal"

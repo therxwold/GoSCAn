@@ -86,6 +86,7 @@ type CVSS struct {
 	Version string  `json:"version,omitempty"`
 	Vector  string  `json:"vector,omitempty"`
 	Score   float64 `json:"score,omitempty"`
+	Source  string  `json:"source,omitempty"`
 }
 
 // EPSS stores FIRST Exploit Prediction Scoring System probability data.
@@ -95,18 +96,33 @@ type EPSS struct {
 	Date       string  `json:"date,omitempty"`
 }
 
+// AdvisorySource identifies a vulnerability data source used by GoSCAn.
+type AdvisorySource string
+
+const (
+	// SourceOSV identifies OSV and the Go Vulnerability Database data exposed through OSV.
+	SourceOSV AdvisorySource = "osv"
+	// SourceGitHub identifies the GitHub Advisory Database.
+	SourceGitHub AdvisorySource = "github"
+	// SourceNVD identifies the NIST National Vulnerability Database.
+	SourceNVD AdvisorySource = "nvd"
+)
+
 // Vulnerability is GoSCAn's normalized advisory representation.
 type Vulnerability struct {
-	ID         string   `json:"id"`
-	Aliases    []string `json:"aliases,omitempty"`
-	Summary    string   `json:"summary,omitempty"`
-	Details    string   `json:"details,omitempty"`
-	CVEs       []string `json:"cves,omitempty"`
-	Fixed      string   `json:"fixed_version,omitempty"`
-	CVSS       *CVSS    `json:"cvss,omitempty"`
-	EPSS       *EPSS    `json:"epss,omitempty"`
-	Severity   Severity `json:"severity"`
-	References []string `json:"references,omitempty"`
+	ID             string           `json:"id"`
+	Aliases        []string         `json:"aliases,omitempty"`
+	Summary        string           `json:"summary,omitempty"`
+	Details        string           `json:"details,omitempty"`
+	CVEs           []string         `json:"cves,omitempty"`
+	Fixed          string           `json:"fixed_version,omitempty"`
+	CVSS           *CVSS            `json:"cvss,omitempty"`
+	EPSS           *EPSS            `json:"epss,omitempty"`
+	Severity       Severity         `json:"severity"`
+	CWEs           []string         `json:"cwes,omitempty"`
+	References     []string         `json:"references,omitempty"`
+	Sources        []AdvisorySource `json:"sources,omitempty"`
+	KnownExploited bool             `json:"known_exploited,omitempty"`
 }
 
 // FixStrategy identifies how GoSCAn recommends changing the module graph.

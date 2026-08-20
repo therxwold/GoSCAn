@@ -321,6 +321,7 @@ func mergeGroup(modulePath, current string, records []Record) model.Vulnerabilit
 	return model.Vulnerability{
 		ID: primary.ID, Aliases: allIDs, Summary: primary.Summary, Details: primary.Details,
 		CVEs: cves, Fixed: fixed, CVSS: bestCVSS, Severity: severity, References: refs,
+		Sources: []model.AdvisorySource{model.SourceOSV},
 	}
 }
 
@@ -379,7 +380,7 @@ func bestCVSSForRecord(r Record, modulePath string) *model.CVSS {
 		if err != nil {
 			continue
 		}
-		c := &model.CVSS{Version: version, Vector: s.Score, Score: score}
+		c := &model.CVSS{Version: version, Vector: s.Score, Score: score, Source: string(model.SourceOSV)}
 		if best == nil || c.Score > best.Score {
 			best = c
 		}
