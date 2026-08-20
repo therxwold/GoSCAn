@@ -130,6 +130,60 @@ Dependency manifests:
 The left-hand version is what the parent module declares. `selected` is the version Go actually builds. A vulnerable lower version mentioned by a dependency does **not** become an active finding when MVS has already selected a safe higher version. The declaration is retained as provenance and remediation context instead of being promoted into a false positive. JSON always includes this dependency manifest metadata under `dependencies`; `--show-manifests` controls the extra terminal output.
 
 
+## Go and dependency health
+
+GoSCAn treats maintenance risk separately from known vulnerabilities. By default it checks the main module's `go` directive against the latest stable Go release and inspects **every module in Go's selected build list** for newer versions, Go module deprecation notices, archived GitHub repositories, stale repositories, and explicit upstream maintenance notices. That includes direct requirements, explicit `// indirect` requirements, and deeper transitive dependencies selected through other modules. Dependency-health findings include a path from the main module so the parent that introduced a transitive risk is visible.
+
+GoSCAn discovers the current release from Go's official downloads JSON endpoint (`https://go.dev/dl/?mode=json`), filters stable releases, and chooses the highest version using Go module semver rules. The latest release is therefore not hard-coded into GoSCAn. For example, when the endpoint reports `go1.27.0` as latest, a project that still declares `go 1.18` can produce:
+
+```text
+Go version:
+  go:        1.18 -> 1.27 (unsupported; latest stable go1.27.0)
+```
+
+If the main module already has a `toolchain` directive, GoSCAn checks that exact toolchain too and recommends the newest stable toolchain when it is behind. It does not add a `toolchain` directive to projects that do not already use one.
+
+Maintenance findings are not CVEs. A dependency can therefore have no known vulnerability and still be reported as `UNMAINTAINED`, `ARCHIVED`, `STALE`, `DEPRECATED`, or `OUTDATED`. This is intentional. For example, `github.com/go-martini/martini` is flagged when upstream explicitly states that the framework is no longer maintained, and any selected dependencies below Martini are checked independently as well. GoSCAn never promotes a version merely mentioned in a dependency's `go.mod` into an active health or vulnerability finding: the selected MVS build list remains the source of truth.
+
+Useful policy flags:
+
+```bash
+goscan scan --fail-on-outdated-go
+goscan scan --fail-on-unmaintained
+goscan scan --stale-after-days 730
+```
+
+The checks can be disabled independently with `--no-go-version` and `--no-health`.
+
+### Automatic update pull requests
+
+The GitHub Action can optionally apply safe, mechanical updates and open or refresh one pull request. What it is allowed to change is explicit:
+
+```yaml
+permissions:
+  contents: write
+  pull-requests: write
+
+steps:
+  - uses: actions/checkout@<full-commit-sha>
+    with:
+      persist-credentials: false
+
+  - uses: therxwold/GoSCAn@<full-commit-sha>
+    env:
+      GOSCAN_NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+    with:
+      fail-on: high
+      fail-on-outdated-go: "true"
+      fail-on-unmaintained: "true"
+      create-pr: "true"
+      pr-vulnerabilities: "true"
+      pr-go-version: "true"
+      pr-toolchain: "true"
+```
+
+`pr-go-version` updates the `go` directive. `pr-toolchain` only updates an existing `toolchain` directive. `pr-vulnerabilities` applies GoSCAn's verified module fixes. Maintenance warnings such as an abandoned framework are never replaced automatically because choosing a new library is an architectural decision. The Action still returns the original scan failure after opening/updating a PR, so creating a remediation PR never hides an unresolved policy violation.
+
 ## Configuration
 
 GoSCAn can run without a configuration file. `config.yml` is useful when you want repeatable local defaults, but CLI flags and environment variables are still first-class so CI does not need to write secrets to disk.

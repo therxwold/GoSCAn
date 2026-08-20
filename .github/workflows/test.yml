@@ -37,7 +37,7 @@ jobs:
       - run: ./bin/goscan scan --help
       - run: ./bin/goscan fix --help
       - name: Self-scan selected dependencies
-        run: ./bin/goscan scan --no-github --no-nvd --no-epss --fail-on=high .
+        run: ./bin/goscan scan --no-github --no-nvd --no-epss --no-health --no-go-version --fail-on=high .
       - name: Check GoSCAn with govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
       - name: Verify tracked files stayed clean
@@ -79,6 +79,8 @@ jobs:
           no-github: "true"
           no-nvd: "true"
           no-epss: "true"
+          no-health: "true"
+          no-go-version: "true"
           show-manifests: "true"
           format: json
           output-file: .goscan/report.json

@@ -1,5 +1,5 @@
 name: GoSCAn
-description: Scan all selected Go modules for vulnerabilities and fail CI on policy thresholds.
+description: Scan Go dependencies, Go version directives, and maintenance health; enforce policy and optionally open update PRs.
 author: Naru K
 inputs:
   path:
@@ -15,7 +15,7 @@ inputs:
     required: false
     default: "-1"
   strict-enrichment:
-    description: Fail when an enabled GitHub, NVD, or EPSS enrichment source is unavailable.
+    description: Fail when an enabled advisory or health data source is unavailable.
     required: false
     default: "false"
   format:
@@ -54,6 +54,54 @@ inputs:
     description: Show requirements declared by selected dependency go.mod manifests.
     required: false
     default: "false"
+  no-health:
+    description: Disable dependency maintenance health checks.
+    required: false
+    default: "false"
+  no-go-version:
+    description: Disable Go language/toolchain freshness checks.
+    required: false
+    default: "false"
+  stale-after-days:
+    description: Flag GitHub dependencies with no pushes for this many days.
+    required: false
+    default: "730"
+  fail-on-outdated-go:
+    description: Fail CI when the go directive or existing toolchain is behind current stable Go.
+    required: false
+    default: "false"
+  fail-on-unmaintained:
+    description: Fail CI when a dependency is explicitly unmaintained or archived.
+    required: false
+    default: "false"
+  create-pr:
+    description: Create or update a pull request with selected automatic fixes. Requires contents:write and pull-requests:write.
+    required: false
+    default: "false"
+  pr-vulnerabilities:
+    description: Include automatically applicable vulnerability fixes in the pull request.
+    required: false
+    default: "true"
+  pr-go-version:
+    description: Upgrade the go directive in the pull request when a newer stable Go release exists.
+    required: false
+    default: "true"
+  pr-toolchain:
+    description: Upgrade an existing toolchain directive in the pull request.
+    required: false
+    default: "true"
+  pr-branch:
+    description: Branch used for automated GoSCAn updates.
+    required: false
+    default: "goscan/updates"
+  pr-title:
+    description: Pull request title for automated updates.
+    required: false
+    default: "chore: apply GoSCAn updates"
+  pr-commit-message:
+    description: Commit message for automated updates.
+    required: false
+    default: "chore: apply GoSCAn updates"
 runs:
   using: composite
   steps:
@@ -72,6 +120,7 @@ runs:
           -o "$RUNNER_TEMP/goscan" ./cmd/goscan
 
     - name: Scan dependencies
+      id: scan
       shell: bash
       env:
         GOSCAN_DEFAULT_GITHUB_TOKEN: ${{ github.token }}
@@ -88,6 +137,12 @@ runs:
         GOSCAN_IGNORE: ${{ inputs.ignore }}
         GOSCAN_SHOW_IGNORED: ${{ inputs.show-ignored }}
         GOSCAN_SHOW_MANIFESTS: ${{ inputs.show-manifests }}
+        GOSCAN_NO_HEALTH: ${{ inputs.no-health }}
+        GOSCAN_NO_GO_VERSION: ${{ inputs.no-go-version }}
+        GOSCAN_STALE_AFTER_DAYS: ${{ inputs.stale-after-days }}
+        GOSCAN_FAIL_ON_OUTDATED_GO: ${{ inputs.fail-on-outdated-go }}
+        GOSCAN_FAIL_ON_UNMAINTAINED: ${{ inputs.fail-on-unmaintained }}
+        GOSCAN_CREATE_PR: ${{ inputs.create-pr }}
       run: |
         set -euo pipefail
 
@@ -121,6 +176,19 @@ runs:
         if [[ "$GOSCAN_SHOW_MANIFESTS" == "true" ]]; then
           args+=(--show-manifests)
         fi
+        if [[ "$GOSCAN_NO_HEALTH" == "true" ]]; then
+          args+=(--no-health)
+        fi
+        if [[ "$GOSCAN_NO_GO_VERSION" == "true" ]]; then
+          args+=(--no-go-version)
+        fi
+        args+=(--stale-after-days "$GOSCAN_STALE_AFTER_DAYS")
+        if [[ "$GOSCAN_FAIL_ON_OUTDATED_GO" == "true" ]]; then
+          args+=(--fail-on-outdated-go)
+        fi
+        if [[ "$GOSCAN_FAIL_ON_UNMAINTAINED" == "true" ]]; then
+          args+=(--fail-on-unmaintained)
+        fi
         if [[ -n "$GOSCAN_IGNORE" ]]; then
           while IFS= read -r rule; do
             [[ -n "$rule" ]] && args+=(--ignore "$rule")
@@ -129,12 +197,107 @@ runs:
 
         cd "$GITHUB_WORKSPACE"
         args+=(-- "$GOSCAN_PATH")
+        status=0
+        set +e
         if [[ -n "$GOSCAN_OUTPUT_FILE" ]]; then
           mkdir -p "$(dirname "$GOSCAN_OUTPUT_FILE")"
           "$RUNNER_TEMP/goscan" "${args[@]}" > "$GOSCAN_OUTPUT_FILE"
+          status=$?
         else
           "$RUNNER_TEMP/goscan" "${args[@]}"
+          status=$?
         fi
+        set -e
+        echo "status=$status" >> "$GITHUB_OUTPUT"
+        if [[ "$status" -eq 2 ]]; then
+          exit 2
+        fi
+        if [[ "$status" -ne 0 && "$GOSCAN_CREATE_PR" != "true" ]]; then
+          exit "$status"
+        fi
+
+    - name: Apply configured fixes and open pull request
+      if: ${{ inputs.create-pr == 'true' && github.event_name != 'pull_request' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        GOSCAN_DEFAULT_GITHUB_TOKEN: ${{ github.token }}
+        GOSCAN_CONFIG: ${{ inputs.config }}
+        GOSCAN_PATH: ${{ inputs.path }}
+        GOSCAN_PR_VULNERABILITIES: ${{ inputs.pr-vulnerabilities }}
+        GOSCAN_PR_GO_VERSION: ${{ inputs.pr-go-version }}
+        GOSCAN_PR_TOOLCHAIN: ${{ inputs.pr-toolchain }}
+        GOSCAN_PR_BRANCH: ${{ inputs.pr-branch }}
+        GOSCAN_PR_TITLE: ${{ inputs.pr-title }}
+        GOSCAN_PR_COMMIT_MESSAGE: ${{ inputs.pr-commit-message }}
+        GOSCAN_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      run: |
+        set -euo pipefail
+        cd "$GITHUB_WORKSPACE"
+        if [[ -z "${GOSCAN_GITHUB_TOKEN:-}" ]]; then
+          export GOSCAN_GITHUB_TOKEN="$GOSCAN_DEFAULT_GITHUB_TOKEN"
+        fi
+
+        args=(fix --apply --vulnerabilities="$GOSCAN_PR_VULNERABILITIES" --upgrade-go="$GOSCAN_PR_GO_VERSION" --upgrade-toolchain="$GOSCAN_PR_TOOLCHAIN")
+        if [[ -n "$GOSCAN_CONFIG" ]]; then
+          args+=(--config "$GOSCAN_CONFIG")
+        else
+          args+=(--no-config)
+        fi
+        args+=(-- "$GOSCAN_PATH")
+        "$RUNNER_TEMP/goscan" "${args[@]}"
+
+        module_dir="$GOSCAN_PATH"
+        [[ "$module_dir" == "." ]] && module_dir=""
+        module_go_mod="${module_dir:+$module_dir/}go.mod"
+        module_go_sum="${module_dir:+$module_dir/}go.sum"
+        if [[ -z "$(git status --porcelain -- "$module_go_mod" "$module_go_sum")" ]]; then
+          echo "GoSCAn found no automatically applicable changes for the configured PR policy."
+          exit 0
+        fi
+
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git checkout -B "$GOSCAN_PR_BRANCH"
+        git add -- "$module_go_mod"
+        if [[ -e "$module_go_sum" ]]; then
+          git add -- "$module_go_sum"
+        fi
+        git commit -m "$GOSCAN_PR_COMMIT_MESSAGE"
+
+        # gh configures Git's ephemeral credential helper from GH_TOKEN; the token
+        # is not embedded in the repository remote URL or command arguments.
+        if ! command -v gh >/dev/null 2>&1; then
+          echo "GoSCAn create-pr requires the GitHub CLI (gh) on the runner" >&2
+          exit 2
+        fi
+        gh auth setup-git
+        git fetch origin "refs/heads/$GOSCAN_PR_BRANCH:refs/remotes/origin/$GOSCAN_PR_BRANCH" 2>/dev/null || true
+        git push --force-with-lease origin "HEAD:refs/heads/$GOSCAN_PR_BRANCH"
+
+        existing="$(gh pr list --head "$GOSCAN_PR_BRANCH" --base "$GOSCAN_DEFAULT_BRANCH" --state open --json number --jq '.[0].number // empty')"
+        if [[ -z "$existing" ]]; then
+          gh pr create \
+            --base "$GOSCAN_DEFAULT_BRANCH" \
+            --head "$GOSCAN_PR_BRANCH" \
+            --title "$GOSCAN_PR_TITLE" \
+            --body "Automated GoSCAn update. Review the dependency and Go version changes before merging."
+        else
+          echo "Updated existing GoSCAn pull request #$existing"
+        fi
+
+    - name: Enforce scan result
+      if: ${{ always() && steps.scan.outputs.status != '0' }}
+      shell: bash
+      env:
+        GOSCAN_SCAN_STATUS: ${{ steps.scan.outputs.status }}
+      run: |
+        set -euo pipefail
+        if [[ -z "$GOSCAN_SCAN_STATUS" ]]; then
+          exit 2
+        fi
+        exit "$GOSCAN_SCAN_STATUS"
+
 branding:
   icon: shield
   color: red
