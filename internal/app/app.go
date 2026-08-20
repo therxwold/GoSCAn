@@ -20,7 +20,7 @@ import (
 )
 
 // Version is the current GoSCAn version.
-const Version string = "v0.3.0"
+const Version string = "v0.4.0"
 
 // Run starts GoSCAn and exits with the command result code.
 func Run() {
