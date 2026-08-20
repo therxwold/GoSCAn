@@ -48,6 +48,7 @@ type apiCVE struct {
 		V40 []metric `json:"cvssMetricV40"`
 		V31 []metric `json:"cvssMetricV31"`
 		V30 []metric `json:"cvssMetricV30"`
+		V2  []metric `json:"cvssMetricV2"`
 	} `json:"metrics"`
 	Weaknesses []struct {
 		Description []struct {
@@ -158,7 +159,7 @@ func normalize(cve apiCVE) Record {
 	}
 	r.CWEs = unique(r.CWEs)
 	r.References = unique(r.References)
-	for _, group := range [][]metric{cve.Metrics.V40, cve.Metrics.V31, cve.Metrics.V30} {
+	for _, group := range [][]metric{cve.Metrics.V40, cve.Metrics.V31, cve.Metrics.V30, cve.Metrics.V2} {
 		for _, m := range group {
 			if m.CVSSData.BaseScore <= 0 {
 				continue

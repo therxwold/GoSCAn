@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -45,12 +46,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 }
 
 func runScan(args []string, stdout, stderr io.Writer) int {
-	configPath, configExplicit, err := config.PathFromArgs(args)
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 2
-	}
-	cfg, err := config.Load(configPath, configExplicit)
+	cfg, configPath, err := loadCommandConfig(args)
 	if err != nil {
 		fmt.Fprintln(stderr, "goscan:", err)
 		return 2
@@ -60,6 +56,7 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("goscan scan", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	_ = fs.String("config", configPath, "configuration file (default config.yml when present)")
+	_ = fs.Bool("no-config", false, "ignore config.yml and use built-in/environment defaults")
 	formatName := fs.String("format", cfg.Output.Format, "output format: terminal, json, sarif")
 	jsonAlias := fs.Bool("json", false, "alias for --format=json")
 	failOn := fs.String("fail-on", cfg.Scan.FailOn, "exit 1 at or above severity: none, low, medium, high, critical")
@@ -71,13 +68,15 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 	noEPSS := fs.Bool("no-epss", !cfg.EPSS.Enabled, "disable FIRST EPSS enrichment")
 	showIgnored := fs.Bool("show-ignored", cfg.Ignore.Show, "show findings suppressed as false positives")
 	showManifests := fs.Bool("show-manifests", cfg.Scan.ShowManifests, "show requirements declared by selected dependency manifests")
+	strictEnrichment := fs.Bool("strict-enrichment", cfg.Scan.StrictEnrichment, "fail when an enabled enrichment source is unavailable")
 	fs.Func("ignore", "ignore advisory ID or module@ID; append =reason if wanted; repeatable", func(value string) error {
 		return addIgnoreRule(ignoreRules, value)
 	})
-	githubToken := fs.String("github-token", "", "GitHub token override; environment variables are safer")
-	nvdAPIKey := fs.String("nvd-api-key", "", "NVD API key override; environment variables are safer")
 	timeout := fs.Duration("timeout", cfg.Scan.Timeout, "overall scan timeout")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 2
 	}
 	if fs.NArg() > 1 {
@@ -113,24 +112,26 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "--epss-threshold must be -1 or between 0 and 1")
 		return 2
 	}
+	if *noEPSS && *epssThreshold >= 0 {
+		fmt.Fprintln(stderr, "--epss-threshold requires EPSS enrichment")
+		return 2
+	}
+	if *timeout <= 0 {
+		fmt.Fprintln(stderr, "--timeout must be greater than zero")
+		return 2
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
-	githubAuth := cfg.GitHub.Token
-	if *githubToken != "" {
-		githubAuth = *githubToken
-	}
-	nvdAuth := cfg.NVD.APIKey
-	if *nvdAPIKey != "" {
-		nvdAuth = *nvdAPIKey
-	}
-
 	s := scanner.New()
 	s.ToolVersion = strings.TrimPrefix(Version, "v")
-	s.GitHub = githubadvisory.Client{Token: githubAuth}
-	s.NVD = nvd.Client{APIKey: nvdAuth}
-	report, err := s.Scan(ctx, dir, scanner.Options{NoGitHub: !*githubEnabled, NoNVD: !*nvdEnabled, NoEPSS: *noEPSS, IgnoreRules: ignoreRules})
+	s.GitHub = githubadvisory.Client{Token: cfg.GitHub.Token}
+	s.NVD = nvd.Client{APIKey: cfg.NVD.APIKey}
+	report, err := s.Scan(ctx, dir, scanner.Options{
+		NoGitHub: !*githubEnabled, NoNVD: !*nvdEnabled, NoEPSS: *noEPSS,
+		StrictEnrichment: *strictEnrichment, RequireEPSS: *epssThreshold >= 0, IgnoreRules: ignoreRules,
+	})
 	if err != nil {
 		fmt.Fprintln(stderr, "goscan:", err)
 		return 2
@@ -146,12 +147,7 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 }
 
 func runFix(args []string, stdout, stderr io.Writer) int {
-	configPath, configExplicit, err := config.PathFromArgs(args)
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 2
-	}
-	cfg, err := config.Load(configPath, configExplicit)
+	cfg, configPath, err := loadCommandConfig(args)
 	if err != nil {
 		fmt.Fprintln(stderr, "goscan:", err)
 		return 2
@@ -161,6 +157,7 @@ func runFix(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("goscan fix", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	_ = fs.String("config", configPath, "configuration file (default config.yml when present)")
+	_ = fs.Bool("no-config", false, "ignore config.yml and use built-in/environment defaults")
 	apply := fs.Bool("apply", false, "apply all available first-fixed-version recommendations")
 	runTests := fs.Bool("test", cfg.Fix.RunTests, "run go test ./... after applying fixes")
 	githubEnabled := fs.Bool("github", cfg.GitHub.Enabled, "enable GitHub Advisory Database enrichment")
@@ -170,14 +167,16 @@ func runFix(args []string, stdout, stderr io.Writer) int {
 	noEPSS := fs.Bool("no-epss", !cfg.EPSS.Enabled, "disable FIRST EPSS enrichment")
 	showIgnored := fs.Bool("show-ignored", cfg.Ignore.Show, "show findings suppressed as false positives")
 	showManifests := fs.Bool("show-manifests", cfg.Scan.ShowManifests, "show requirements declared by selected dependency manifests")
+	strictEnrichment := fs.Bool("strict-enrichment", cfg.Scan.StrictEnrichment, "fail when an enabled enrichment source is unavailable")
 	fs.Func("ignore", "ignore advisory ID or module@ID; append =reason if wanted; repeatable", func(value string) error {
 		return addIgnoreRule(ignoreRules, value)
 	})
-	githubToken := fs.String("github-token", "", "GitHub token override; environment variables are safer")
-	nvdAPIKey := fs.String("nvd-api-key", "", "NVD API key override; environment variables are safer")
 	formatName := fs.String("format", cfg.Output.Format, "output format: terminal, json, sarif")
 	timeout := fs.Duration("timeout", cfg.Fix.Timeout, "overall fix/verification timeout")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 2
 	}
 	if fs.NArg() > 1 {
@@ -201,24 +200,19 @@ func runFix(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err)
 		return 2
 	}
+	if *timeout <= 0 {
+		fmt.Fprintln(stderr, "--timeout must be greater than zero")
+		return 2
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
-	githubAuth := cfg.GitHub.Token
-	if *githubToken != "" {
-		githubAuth = *githubToken
-	}
-	nvdAuth := cfg.NVD.APIKey
-	if *nvdAPIKey != "" {
-		nvdAuth = *nvdAPIKey
-	}
-
 	s := scanner.New()
 	s.ToolVersion = strings.TrimPrefix(Version, "v")
-	s.GitHub = githubadvisory.Client{Token: githubAuth}
-	s.NVD = nvd.Client{APIKey: nvdAuth}
-	opts := scanner.Options{NoGitHub: !*githubEnabled, NoNVD: !*nvdEnabled, NoEPSS: *noEPSS, IgnoreRules: ignoreRules}
+	s.GitHub = githubadvisory.Client{Token: cfg.GitHub.Token}
+	s.NVD = nvd.Client{APIKey: cfg.NVD.APIKey}
+	opts := scanner.Options{NoGitHub: !*githubEnabled, NoNVD: !*nvdEnabled, NoEPSS: *noEPSS, StrictEnrichment: *strictEnrichment, IgnoreRules: ignoreRules}
 	report, err := s.Scan(ctx, dir, opts)
 	if err != nil {
 		fmt.Fprintln(stderr, "goscan:", err)
@@ -250,6 +244,39 @@ func runFix(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+func loadCommandConfig(args []string) (config.Config, string, error) {
+	if requestsHelp(args) {
+		return config.Default(), "config.yml", nil
+	}
+	if configDisabled(args) {
+		return config.FromEnvironment(), "config.yml", nil
+	}
+	path, explicit, err := config.PathFromArgs(args)
+	if err != nil {
+		return config.Config{}, "", err
+	}
+	cfg, err := config.Load(path, explicit)
+	return cfg, path, err
+}
+
+func configDisabled(args []string) bool {
+	for _, arg := range args {
+		if arg == "--no-config" || arg == "--no-config=true" {
+			return true
+		}
+	}
+	return false
+}
+
+func requestsHelp(args []string) bool {
+	for _, arg := range args {
+		if arg == "-h" || arg == "--help" {
+			return true
+		}
+	}
+	return false
 }
 
 func copyIgnoreRules(in map[string]string) map[string]string {

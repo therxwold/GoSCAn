@@ -66,6 +66,10 @@ func (a Applier) Apply(ctx context.Context, root string, findings []model.Findin
 		rollback()
 		return fmt.Errorf("go mod tidy: %w: %s", err, string(out))
 	}
+	if out, err := a.Runner.Run(ctx, root, "go", "mod", "verify"); err != nil {
+		rollback()
+		return fmt.Errorf("go mod verify: %w: %s", err, string(out))
+	}
 	if runTests {
 		if out, err := a.Runner.Run(ctx, root, "go", "test", "./..."); err != nil {
 			rollback()

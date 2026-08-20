@@ -47,10 +47,11 @@ type IgnoreConfig struct {
 
 // ScanConfig contains defaults used by the scan command.
 type ScanConfig struct {
-	FailOn        string
-	EPSSThreshold float64
-	ShowManifests bool
-	Timeout       time.Duration
+	FailOn           string
+	EPSSThreshold    float64
+	ShowManifests    bool
+	StrictEnrichment bool
+	Timeout          time.Duration
 }
 
 // FixConfig contains defaults used by the fix command.
@@ -78,10 +79,11 @@ type fileConfig struct {
 	} `yaml:"epss"`
 	Ignore map[string]any `yaml:"ignore"`
 	Scan   *struct {
-		FailOn        *string  `yaml:"fail_on"`
-		EPSSThreshold *float64 `yaml:"epss_threshold"`
-		ShowManifests *bool    `yaml:"show_manifests"`
-		Timeout       *string  `yaml:"timeout"`
+		FailOn           *string  `yaml:"fail_on"`
+		EPSSThreshold    *float64 `yaml:"epss_threshold"`
+		ShowManifests    *bool    `yaml:"show_manifests"`
+		StrictEnrichment *bool    `yaml:"strict_enrichment"`
+		Timeout          *string  `yaml:"timeout"`
 	} `yaml:"scan"`
 	Fix *struct {
 		RunTests *bool   `yaml:"run_tests"`
@@ -110,6 +112,13 @@ func Default() Config {
 		},
 		Output: OutputConfig{Format: "terminal"},
 	}
+}
+
+// FromEnvironment returns built-in defaults with supported environment overrides applied.
+func FromEnvironment() Config {
+	cfg := Default()
+	applyEnvironment(&cfg)
+	return cfg
 }
 
 // Load reads an optional YAML configuration file and then applies environment overrides.
@@ -155,8 +164,7 @@ func PathFromArgs(args []string) (path string, explicit bool, err error) {
 }
 
 func decodeYAML(data []byte, cfg *Config) error {
-	expanded := os.ExpandEnv(string(data))
-	dec := yaml.NewDecoder(bytes.NewBufferString(expanded))
+	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 
 	var raw fileConfig
@@ -179,7 +187,7 @@ func mergeFileConfig(cfg *Config, raw fileConfig) error {
 			cfg.GitHub.Enabled = *raw.GitHub.Enabled
 		}
 		if raw.GitHub.Token != nil {
-			cfg.GitHub.Token = *raw.GitHub.Token
+			cfg.GitHub.Token = os.ExpandEnv(*raw.GitHub.Token)
 		}
 	}
 	if raw.NVD != nil {
@@ -187,7 +195,7 @@ func mergeFileConfig(cfg *Config, raw fileConfig) error {
 			cfg.NVD.Enabled = *raw.NVD.Enabled
 		}
 		if raw.NVD.APIKey != nil {
-			cfg.NVD.APIKey = *raw.NVD.APIKey
+			cfg.NVD.APIKey = os.ExpandEnv(*raw.NVD.APIKey)
 		}
 	}
 	if raw.EPSS != nil && raw.EPSS.Enabled != nil {
@@ -207,10 +215,14 @@ func mergeFileConfig(cfg *Config, raw fileConfig) error {
 				continue
 			}
 			reason, ok := value.(string)
-			if !ok || strings.TrimSpace(reason) == "" {
+			if !ok {
 				return fmt.Errorf("ignore rule %s requires a reason", key)
 			}
-			cfg.Ignore.Rules[strings.TrimSpace(key)] = strings.TrimSpace(reason)
+			reason = strings.TrimSpace(os.ExpandEnv(reason))
+			if reason == "" {
+				return fmt.Errorf("ignore rule %s requires a reason", key)
+			}
+			cfg.Ignore.Rules[strings.TrimSpace(key)] = reason
 		}
 	}
 	if raw.Scan != nil {
@@ -223,10 +235,16 @@ func mergeFileConfig(cfg *Config, raw fileConfig) error {
 		if raw.Scan.ShowManifests != nil {
 			cfg.Scan.ShowManifests = *raw.Scan.ShowManifests
 		}
+		if raw.Scan.StrictEnrichment != nil {
+			cfg.Scan.StrictEnrichment = *raw.Scan.StrictEnrichment
+		}
 		if raw.Scan.Timeout != nil {
 			v, err := time.ParseDuration(*raw.Scan.Timeout)
 			if err != nil {
 				return fmt.Errorf("scan.timeout: %w", err)
+			}
+			if v <= 0 {
+				return fmt.Errorf("scan.timeout must be greater than zero")
 			}
 			cfg.Scan.Timeout = v
 		}
@@ -239,6 +257,9 @@ func mergeFileConfig(cfg *Config, raw fileConfig) error {
 			v, err := time.ParseDuration(*raw.Fix.Timeout)
 			if err != nil {
 				return fmt.Errorf("fix.timeout: %w", err)
+			}
+			if v <= 0 {
+				return fmt.Errorf("fix.timeout must be greater than zero")
 			}
 			cfg.Fix.Timeout = v
 		}

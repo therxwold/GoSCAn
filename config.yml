@@ -23,6 +23,7 @@ scan:
   fail_on: "none"
   epss_threshold: -1
   show_manifests: false
+  strict_enrichment: false
   timeout: "2m"
 
 fix:

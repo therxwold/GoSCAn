@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/therxwold/GoSCAn/internal/model"
 )
 
 func TestQuery(t *testing.T) {
@@ -40,5 +42,21 @@ func TestQuery(t *testing.T) {
 	}
 	if r.CVSS == nil || r.CVSS.Score != 9.8 || r.CVSS.Source != "nvd" || len(r.CWEs) != 1 || r.CWEs[0] != "CWE-787" {
 		t.Fatalf("missing metadata %#v", r)
+	}
+}
+
+func TestNormalizeIncludesCVSSV2(t *testing.T) {
+	var cve apiCVE
+	cve.ID = "CVE-2026-2000"
+	var m metric
+	m.CVSSData.Version = "2.0"
+	m.CVSSData.VectorString = "AV:N/AC:L/Au:N/C:P/I:P/A:P"
+	m.CVSSData.BaseScore = 7.5
+	m.BaseSeverity = "HIGH"
+	cve.Metrics.V2 = []metric{m}
+
+	r := normalize(cve)
+	if r.CVSS == nil || r.CVSS.Version != "2.0" || r.CVSS.Score != 7.5 || r.Severity != model.SeverityHigh {
+		t.Fatalf("unexpected CVSS v2 metadata: %#v", r)
 	}
 }

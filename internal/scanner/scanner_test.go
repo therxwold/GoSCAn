@@ -3,6 +3,7 @@ package scanner
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -236,5 +237,41 @@ func TestModuleScopedIgnoreDoesNotSuppressAnotherModule(t *testing.T) {
 	rule, reason, ok := matchingIgnoreRule(finding, map[string]string{"example.com/deep@GHSA-test-1234-5678": "accepted false positive"})
 	if !ok || rule != "example.com/deep@GHSA-test-1234-5678" || reason != "accepted false positive" {
 		t.Fatalf("unexpected scoped match: rule=%q reason=%q ok=%v", rule, reason, ok)
+	}
+}
+
+type failingEPSS struct{}
+
+func (failingEPSS) Query(context.Context, []string) (map[string]model.EPSS, error) {
+	return nil, errors.New("epss is having a day")
+}
+
+func TestStrictEnrichmentFailsClosed(t *testing.T) {
+	g := dependency.ParseGraph([]byte("example.com/app example.com/deep@v1.2.0\n"), map[string]string{"example.com/app": "", "example.com/deep": "v1.2.0"})
+	g.AddRoot("example.com/app")
+	s := &Scanner{
+		Dependencies: fakeDeps{&dependency.Result{Root: "/x", MainModule: "example.com/app", Modules: []model.Module{
+			{Path: "example.com/app", Main: true, Kind: model.DependencyMain},
+			{Path: "example.com/deep", Version: "v1.2.0", Kind: model.DependencyDirect},
+		}, Graph: g}},
+		Vulnerabilities: fakeVulns{}, GitHub: failingGitHub{}, Versions: fakeLatest{},
+	}
+	if _, err := s.Scan(context.Background(), ".", Options{StrictEnrichment: true, NoNVD: true, NoEPSS: true}); err == nil || !strings.Contains(err.Error(), "GitHub advisory enrichment failed") {
+		t.Fatalf("expected strict enrichment error, got %v", err)
+	}
+}
+
+func TestRequiredEPSSFailsClosed(t *testing.T) {
+	g := dependency.ParseGraph([]byte("example.com/app example.com/deep@v1.2.0\n"), map[string]string{"example.com/app": "", "example.com/deep": "v1.2.0"})
+	g.AddRoot("example.com/app")
+	s := &Scanner{
+		Dependencies: fakeDeps{&dependency.Result{Root: "/x", MainModule: "example.com/app", Modules: []model.Module{
+			{Path: "example.com/app", Main: true, Kind: model.DependencyMain},
+			{Path: "example.com/deep", Version: "v1.2.0", Kind: model.DependencyDirect},
+		}, Graph: g}},
+		Vulnerabilities: fakeVulns{}, EPSS: failingEPSS{}, Versions: fakeLatest{},
+	}
+	if _, err := s.Scan(context.Background(), ".", Options{NoGitHub: true, NoNVD: true, RequireEPSS: true}); err == nil || !strings.Contains(err.Error(), "EPSS enrichment failed") {
+		t.Fatalf("expected required EPSS error, got %v", err)
 	}
 }

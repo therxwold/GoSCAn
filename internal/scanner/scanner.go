@@ -50,10 +50,12 @@ type Scanner struct {
 
 // Options controls optional scan behavior.
 type Options struct {
-	NoGitHub    bool
-	NoNVD       bool
-	NoEPSS      bool
-	IgnoreRules map[string]string
+	NoGitHub         bool
+	NoNVD            bool
+	NoEPSS           bool
+	StrictEnrichment bool
+	RequireEPSS      bool
+	IgnoreRules      map[string]string
 }
 
 // New returns a Scanner wired to the default Go, OSV, GitHub, NVD, EPSS, and version providers.
@@ -140,9 +142,24 @@ func (s *Scanner) Scan(ctx context.Context, dir string, opts Options) (*model.Re
 		}
 	}
 
-	s.enrichGitHub(ctx, report, opts)
-	s.enrichNVD(ctx, report, opts)
-	s.enrichEPSS(ctx, report, opts)
+	if err := s.enrichGitHub(ctx, report, opts); err != nil {
+		if opts.StrictEnrichment {
+			return nil, err
+		}
+		report.Warnings = append(report.Warnings, err.Error())
+	}
+	if err := s.enrichNVD(ctx, report, opts); err != nil {
+		if opts.StrictEnrichment {
+			return nil, err
+		}
+		report.Warnings = append(report.Warnings, err.Error())
+	}
+	if err := s.enrichEPSS(ctx, report, opts); err != nil {
+		if opts.StrictEnrichment || opts.RequireEPSS {
+			return nil, err
+		}
+		report.Warnings = append(report.Warnings, err.Error())
+	}
 	applyIgnores(report, opts.IgnoreRules)
 
 	for i := range report.Findings {
@@ -257,9 +274,9 @@ func sortFindings(findings []model.Finding) {
 	})
 }
 
-func (s *Scanner) enrichGitHub(ctx context.Context, report *model.Report, opts Options) {
+func (s *Scanner) enrichGitHub(ctx context.Context, report *model.Report, opts Options) error {
 	if opts.NoGitHub || s.GitHub == nil || len(report.Findings) == 0 {
-		return
+		return nil
 	}
 	var ids []string
 	lookup := make([]string, len(report.Findings))
@@ -271,7 +288,7 @@ func (s *Scanner) enrichGitHub(ctx context.Context, report *model.Report, opts O
 	}
 	records, err := s.GitHub.Query(ctx, ids)
 	if err != nil {
-		report.Warnings = append(report.Warnings, "GitHub advisory enrichment failed: "+err.Error())
+		return fmt.Errorf("GitHub advisory enrichment failed: %w", err)
 	}
 	for i := range report.Findings {
 		r, ok := records[lookup[i]]
@@ -300,11 +317,12 @@ func (s *Scanner) enrichGitHub(ctx context.Context, report *model.Report, opts O
 		sort.Strings(v.Aliases)
 		sort.Strings(v.CVEs)
 	}
+	return nil
 }
 
-func (s *Scanner) enrichNVD(ctx context.Context, report *model.Report, opts Options) {
+func (s *Scanner) enrichNVD(ctx context.Context, report *model.Report, opts Options) error {
 	if opts.NoNVD || s.NVD == nil || len(report.Findings) == 0 {
-		return
+		return nil
 	}
 	var cves []string
 	for _, f := range report.Findings {
@@ -312,7 +330,7 @@ func (s *Scanner) enrichNVD(ctx context.Context, report *model.Report, opts Opti
 	}
 	records, err := s.NVD.Query(ctx, cves)
 	if err != nil {
-		report.Warnings = append(report.Warnings, "NVD enrichment failed: "+err.Error())
+		return fmt.Errorf("NVD enrichment failed: %w", err)
 	}
 	for i := range report.Findings {
 		v := &report.Findings[i].Vulnerability
@@ -331,23 +349,23 @@ func (s *Scanner) enrichNVD(ctx context.Context, report *model.Report, opts Opti
 			v.KnownExploited = v.KnownExploited || r.KnownExploited
 		}
 	}
+	return nil
 }
 
-func (s *Scanner) enrichEPSS(ctx context.Context, report *model.Report, opts Options) {
+func (s *Scanner) enrichEPSS(ctx context.Context, report *model.Report, opts Options) error {
 	if opts.NoEPSS || s.EPSS == nil || len(report.Findings) == 0 {
-		return
+		return nil
 	}
 	var cves []string
 	for _, f := range report.Findings {
 		cves = append(cves, f.Vulnerability.CVEs...)
 	}
 	if len(cves) == 0 {
-		return
+		return nil
 	}
 	scores, err := s.EPSS.Query(ctx, cves)
 	if err != nil {
-		report.Warnings = append(report.Warnings, "EPSS enrichment failed: "+err.Error())
-		return
+		return fmt.Errorf("EPSS enrichment failed: %w", err)
 	}
 	for i := range report.Findings {
 		var best *model.EPSS
@@ -359,6 +377,7 @@ func (s *Scanner) enrichEPSS(ctx context.Context, report *model.Report, opts Opt
 		}
 		report.Findings[i].Vulnerability.EPSS = best
 	}
+	return nil
 }
 
 func githubLookupID(v model.Vulnerability) string {

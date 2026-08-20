@@ -66,6 +66,7 @@ func TestApplySuccessRunsGetTidyAndTests(t *testing.T) {
 	want := []string{
 		"go get example.com/a@v1.2.3",
 		"go mod tidy",
+		"go mod verify",
 		"go test ./...",
 	}
 	if strings.Join(r.calls, "\n") != strings.Join(want, "\n") {
@@ -137,6 +138,20 @@ func TestApplyRollsBackOnTidyFailure(t *testing.T) {
 	root := t.TempDir()
 	originalMod, originalSum := writeModuleFiles(t, root, true)
 	r := &applyRunner{failOn: "go mod tidy", mutate: true}
+	if err := (Applier{Runner: r}).Apply(context.Background(), root, oneFix(), true); err == nil {
+		t.Fatal("expected error")
+	}
+	gotMod, _ := os.ReadFile(filepath.Join(root, "go.mod"))
+	gotSum, _ := os.ReadFile(filepath.Join(root, "go.sum"))
+	if string(gotMod) != originalMod || string(gotSum) != originalSum {
+		t.Fatalf("module files were not restored")
+	}
+}
+
+func TestApplyRollsBackOnVerifyFailure(t *testing.T) {
+	root := t.TempDir()
+	originalMod, originalSum := writeModuleFiles(t, root, true)
+	r := &applyRunner{failOn: "go mod verify", mutate: true}
 	if err := (Applier{Runner: r}).Apply(context.Background(), root, oneFix(), true); err == nil {
 		t.Fatal("expected error")
 	}
