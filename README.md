@@ -24,7 +24,7 @@ Its job is not only to say that a dependency is vulnerable. It also explains why
 - Supports terminal, JSON, and SARIF output.
 - Supports CI policy exits by severity and/or EPSS threshold.
 - Supports auditable false-positive ignore rules by GO/GHSA/CVE alias, with optional module scoping.
-- Can apply fixes with `go get`, run `go mod tidy`, run tests, and roll back `go.mod`/`go.sum` if verification fails.
+- Can apply fixes with `go get`, run `go mod tidy`, verify downloaded modules, run tests, and roll back `go.mod`/`go.sum` if verification fails.
 
 Local filesystem replacements are intentionally skipped because a registry version no longer identifies the code being built. Versioned `replace` targets are scanned, but GoSCAn does not automatically rewrite replacement directives because guessing the intended replacement scope is unsafe.
 
@@ -163,6 +163,7 @@ scan:
   fail_on: "none"
   epss_threshold: -1
   show_manifests: false
+  strict_enrichment: false
   timeout: "2m"
 
 fix:
@@ -191,6 +192,14 @@ Use another configuration file with:
 goscan scan --config ./ci/goscan.yml
 ```
 
+If the current project has an unrelated `config.yml`, bypass automatic config discovery while still honoring environment variables:
+
+```bash
+goscan scan --no-config
+```
+
+The GitHub Action does this automatically unless its `config:` input is explicitly set, so a repository's application configuration cannot accidentally become GoSCAn policy.
+
 Source enrichment can be disabled independently:
 
 ```bash
@@ -199,7 +208,15 @@ goscan scan --no-nvd
 goscan scan --no-epss
 ```
 
-The equivalent positive boolean flags, `--github` and `--nvd`, are also available and can be set explicitly with Go flag syntax such as `--github=false`. Tokens also have `--github-token` and `--nvd-api-key` overrides, although environment variables are safer because command-line arguments may be visible to other local processes or CI logs.
+By default, OSV remains authoritative and optional enrichment failures are reported as warnings. For security gates that must not silently lose GitHub, NVD, or EPSS context, enable fail-closed enrichment:
+
+```bash
+goscan scan --strict-enrichment
+```
+
+When `--epss-threshold` is configured, EPSS becomes required automatically. Combining an EPSS threshold with `--no-epss` is rejected instead of allowing the policy to fail open.
+
+The equivalent positive boolean flags, `--github` and `--nvd`, are also available and can be set explicitly with Go flag syntax such as `--github=false`. Credentials intentionally do **not** have command-line flags: keep GitHub/NVD tokens in environment variables or a private config file so they do not appear in process arguments or copied CI commands.
 
 ## Ignoring false positives
 
@@ -261,9 +278,10 @@ The apply path is intentionally conservative:
 1. Back up `go.mod` and `go.sum`.
 2. Run `go get module@first-fixed` for each affected module.
 3. Run `go mod tidy`.
-4. Run `go test ./...` by default.
-5. Restore `go.mod` and `go.sum` if a command or test fails.
-6. Rescan after a successful apply.
+4. Run `go mod verify`.
+5. Run `go test ./...` by default.
+6. Restore `go.mod` and `go.sum` if a command, verification, or test fails.
+7. Rescan after a successful apply.
 
 Disable tests only when you explicitly want that behavior:
 
@@ -285,7 +303,7 @@ Fail when EPSS is at least 10% even if the CVSS severity threshold does not fire
 goscan scan --fail-on=high --epss-threshold=0.10
 ```
 
-Disable EPSS network enrichment:
+Disable EPSS network enrichment when no EPSS failure threshold is configured:
 
 ```bash
 goscan scan --no-epss
@@ -319,7 +337,7 @@ goscan scan --format=sarif > goscan.sarif
 
 ## GitHub Action
 
-GitHub Action usage:
+For production workflows, pin third-party actions and GoSCAn itself to reviewed full commit SHAs. GoSCAn does not require checkout credentials to remain persisted in the working tree.
 
 ```yaml
 name: dependency-security
@@ -334,19 +352,39 @@ permissions:
 jobs:
   goscan:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v5
-      - uses: therxwold/GoSCAn@main
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
+
+      # Replace <FULL_COMMIT_SHA> with a reviewed GoSCAn commit.
+      - uses: therxwold/GoSCAn@<FULL_COMMIT_SHA>
+        env:
+          GOSCAN_NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+        with:
+          path: .
           fail-on: high
           epss-threshold: "0.10"
-          nvd-api-key: ${{ secrets.NVD_API_KEY }}
+          strict-enrichment: "true"
           ignore: |
             GO-2026-1234=confirmed false positive
             golang.org/x/net@CVE-2026-56789=unsupported target only
 ```
 
-The action builds GoSCAn using the Go version declared by GoSCAn itself, then scans the caller workspace. GitHub Advisory enrichment automatically uses the workflow `github.token`; an NVD API key can be passed from a repository secret. Ignore rules can come from the selected `config.yml` or the newline-separated `ignore` input. This avoids making the scanner build depend on whether the target project uses an older Go release.
+The action builds GoSCAn with Go 1.26.6 and then scans `path` inside the caller workspace. GitHub Advisory enrichment uses the workflow `github.token` unless the caller explicitly provides `GOSCAN_GITHUB_TOKEN`. NVD credentials are inherited from `GOSCAN_NVD_API_KEY`; there is deliberately no secret-shaped action input or CLI token flag. Ignore rules can come from the selected `config.yml` or the newline-separated `ignore` input.
+
+For monorepositories, set `path` to the Go module directory. To save machine-readable output instead of printing it to the workflow log:
+
+```yaml
+      - uses: therxwold/GoSCAn@<FULL_COMMIT_SHA>
+        with:
+          path: backend
+          format: sarif
+          output-file: artifacts/goscan.sarif
+```
+
+Because this repository intentionally does not publish movable release tags, a full commit SHA is the recommended production reference. `@main` is convenient for experimentation but should not be treated as an immutable security dependency.
 
 ## Other CI systems
 
@@ -380,16 +418,40 @@ cmd/goscan
 Run the full local verification suite:
 
 ```bash
-go test -race ./...
-go vet ./...
-make build
+make release-check
 ```
 
 The test suite is written and maintained by **Eluuna**. It is deliberately strict around the parts most likely to lie: dependency classification and graph paths, selected-parent manifest requirements, requested-vs-selected versions, local module-graph integration, OSV alias grouping/pagination/fixed-version selection, GitHub/NVD enrichment, config precedence, false-positive suppression and module scoping, EPSS parsing, CVSS 2.0/3.x/4.0 scoring, version resolution, terminal/JSON/SARIF output, CI severity/EPSS policy evaluation, and remediation planning.
 
-Fix application tests verify the successful `go get` -> `go mod tidy` -> `go test ./...` sequence, highest-fixed-version deduplication, optional test skipping, replacement safety, rollback on `go get` failure, rollback on `go mod tidy` failure, rollback on test failure, restoration of both `go.mod` and `go.sum`, and removal of a newly created `go.sum` during rollback.
+Fix application tests verify the successful `go get` -> `go mod tidy` -> `go mod verify` -> `go test ./...` sequence, highest-fixed-version deduplication, optional test skipping, replacement safety, rollback on `go get`, tidy, verification, or test failure, restoration of both `go.mod` and `go.sum`, and removal of a newly created `go.sum` during rollback.
 
-The GitHub Actions workflow also contains an `action-smoke` job that invokes the repository's own `action.yml`, so the composite action path is exercised end to end in CI rather than only compiling the CLI directly.
+The GitHub Actions workflow also contains an `action-smoke` job that invokes the repository's own `action.yml`, writes a JSON report, and verifies the report exists. CI additionally checks `go mod tidy`, `go mod verify`, the race detector, `go vet`, `govulncheck`, and basic builds/tests on Linux, macOS, and Windows. Dependabot is configured for both Go modules and GitHub Actions.
+
+## Release check
+
+Before publishing a commit intended for production use:
+
+```bash
+make release-check
+```
+
+This verifies module-file tidiness and checksums, runs the race-enabled test suite and vet, builds GoSCAn, and runs `govulncheck` against GoSCAn itself. The repository CI repeats these checks with Go 1.26.6.
+
+
+## Network and privacy
+
+GoSCAn analyzes the selected module graph and project files locally, but a normal scan can contact external services. Treat module and repository names as potentially sensitive metadata, especially in corporate or private environments.
+
+- **OSV / Go Vulnerability Database** receives selected Go module paths and versions for vulnerability matching.
+- **GitHub** receives advisory identifiers for enrichment. When dependency health checks are enabled, GoSCAn also derives GitHub `owner/repository` names from module paths and queries repository metadata and, for stale repositories, the upstream README for explicit maintenance notices.
+- **NVD** receives CVE identifiers when NVD enrichment is enabled. The NVD API key, when configured, is sent only as authentication to NVD.
+- **FIRST EPSS** receives CVE identifiers when EPSS enrichment is enabled.
+- **go.dev** is queried for the stable Go release list when Go-version health checks are enabled. That request does not include the scanned project's module graph.
+- **The Go command** is used for module loading and version resolution. Operations such as `go list` and `module@latest` follow the user's Go environment, including `GOPROXY`, `GONOPROXY`, `GOPRIVATE`, and `GOSUMDB`, and may disclose requested module paths and versions to those configured services.
+
+GoSCAn does not intentionally upload project source files, `go.mod`, `go.sum`, or environment contents to advisory services. Authentication credentials are sent only to the service they belong to and are not included in reports. Module paths, repository identifiers, and CVE/advisory identifiers can still reveal useful metadata, so organizations scanning private code should review their Go proxy/private-module settings and GoSCAn source settings before CI deployment.
+
+Optional network sources can be reduced with `--no-github`, `--no-nvd`, `--no-epss`, `--no-health`, and `--no-go-version`. OSV remains the primary vulnerability-matching source.
 
 ## Data sources and Go semantics
 
@@ -399,7 +461,7 @@ GoSCAn intentionally delegates module selection to the Go command instead of rei
 
 OSV and the Go Vulnerability Database remain the primary package/version matching source. GitHub's reviewed Advisory Database is used to cross-check and enrich identified advisories, while NVD supplies CVE-centric metadata such as CVSS, CWE, references, and CISA KEV status. EPSS enrichment comes directly from FIRST and is only available when an advisory has a CVE identifier.
 
-GitHub and NVD are enrichment sources rather than replacements for Go ecosystem matching. If either enrichment service is unavailable or rate-limited, GoSCAn keeps the OSV finding and emits a warning instead of discarding the scan result.
+GitHub and NVD are enrichment sources rather than replacements for Go ecosystem matching. By default, if an enrichment service is unavailable or rate-limited, GoSCAn keeps the OSV finding and emits a warning instead of discarding the scan result. `--strict-enrichment` changes that behavior to fail closed. A configured EPSS policy threshold also makes EPSS availability mandatory.
 
 ## Current v0.3 boundaries
 
