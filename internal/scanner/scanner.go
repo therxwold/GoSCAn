@@ -5,12 +5,16 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/therxwold/GoSCAn/internal/dependency"
 	"github.com/therxwold/GoSCAn/internal/epss"
 	"github.com/therxwold/GoSCAn/internal/fixer"
 	"github.com/therxwold/GoSCAn/internal/githubadvisory"
+	"github.com/therxwold/GoSCAn/internal/githubrepo"
+	"github.com/therxwold/GoSCAn/internal/gorelease"
+	"github.com/therxwold/GoSCAn/internal/goversion"
 	"github.com/therxwold/GoSCAn/internal/model"
 	"github.com/therxwold/GoSCAn/internal/nvd"
 	"github.com/therxwold/GoSCAn/internal/osv"
@@ -35,6 +39,12 @@ type epssSource interface {
 type latestResolver interface {
 	Latest(context.Context, string, string) (string, error)
 }
+type goReleaseSource interface {
+	Latest(context.Context) (gorelease.Release, error)
+}
+type repositorySource interface {
+	Query(context.Context, []string, time.Time) (map[string]githubrepo.Record, error)
+}
 
 // Scanner orchestrates dependency discovery, vulnerability lookup, risk enrichment, and remediation planning.
 type Scanner struct {
@@ -44,18 +54,25 @@ type Scanner struct {
 	NVD             nvdSource
 	EPSS            epssSource
 	Versions        latestResolver
+	GoReleases      goReleaseSource
+	Repositories    repositorySource
 	Now             func() time.Time
 	ToolVersion     string
 }
 
 // Options controls optional scan behavior.
 type Options struct {
-	NoGitHub         bool
-	NoNVD            bool
-	NoEPSS           bool
-	StrictEnrichment bool
-	RequireEPSS      bool
-	IgnoreRules      map[string]string
+	NoGitHub          bool
+	NoNVD             bool
+	NoEPSS            bool
+	StrictEnrichment  bool
+	RequireEPSS       bool
+	NoGoVersion       bool
+	NoHealth          bool
+	RequireCurrentGo  bool
+	RequireMaintained bool
+	StaleAfter        time.Duration
+	IgnoreRules       map[string]string
 }
 
 // New returns a Scanner wired to the default Go, OSV, GitHub, NVD, EPSS, and version providers.
@@ -67,6 +84,8 @@ func New() *Scanner {
 		NVD:             nvd.Client{},
 		EPSS:            epss.Client{},
 		Versions:        versionresolver.Resolver{},
+		GoReleases:      gorelease.Client{},
+		Repositories:    githubrepo.Client{},
 		Now:             time.Now,
 	}
 }
@@ -82,6 +101,12 @@ func (s *Scanner) Scan(ctx context.Context, dir string, opts Options) (*model.Re
 	}
 	report := &model.Report{Root: deps.Root, ToolVersion: s.ToolVersion, Module: deps.MainModule, ScannedAt: s.now().UTC()}
 	report.Warnings = append(report.Warnings, deps.Warnings...)
+	if err := s.checkGoVersion(ctx, deps, report, opts); err != nil {
+		if opts.StrictEnrichment || opts.RequireCurrentGo {
+			return nil, err
+		}
+		report.Warnings = append(report.Warnings, err.Error())
+	}
 
 	moduleByKey := map[string]model.Module{}
 	var targets []osv.Target
@@ -112,6 +137,13 @@ func (s *Scanner) Scan(ctx context.Context, dir string, opts Options) (*model.Re
 		key := m.Path + "@" + m.Version
 		moduleByKey[key] = m
 		targets = append(targets, osv.Target{Key: key, Path: path, Version: version})
+	}
+
+	if err := s.enrichDependencyHealth(ctx, deps, report, opts); err != nil {
+		if opts.StrictEnrichment || opts.RequireMaintained {
+			return nil, err
+		}
+		report.Warnings = append(report.Warnings, err.Error())
 	}
 
 	found, err := s.Vulnerabilities.Query(ctx, targets)
@@ -189,6 +221,165 @@ func (s *Scanner) Scan(ctx context.Context, dir string, opts Options) (*model.Re
 	sortFindings(report.IgnoredFindings)
 	report.Warnings = uniqueSorted(report.Warnings)
 	return report, nil
+}
+
+func (s *Scanner) checkGoVersion(ctx context.Context, deps *dependency.Result, report *model.Report, opts Options) error {
+	if opts.NoGoVersion {
+		return nil
+	}
+	if s.GoReleases == nil {
+		if opts.RequireCurrentGo {
+			return fmt.Errorf("Go release check is required but no release source is configured")
+		}
+		return nil
+	}
+	release, err := s.GoReleases.Latest(ctx)
+	if err != nil {
+		return fmt.Errorf("Go release check failed: %w", err)
+	}
+	goHealth := &model.GoHealth{
+		Directive:            deps.GoDirective,
+		Toolchain:            deps.Toolchain,
+		Latest:               release.Version,
+		RecommendedDirective: release.LanguageVersion,
+	}
+	if deps.GoDirective != "" {
+		goHealth.DirectiveOutdated = gorelease.LanguageCompare(deps.GoDirective, release.LanguageVersion) < 0
+		goHealth.Unsupported = !gorelease.Supported(deps.GoDirective, release.LanguageVersion)
+	}
+	if deps.Toolchain != "" && deps.Toolchain != "default" {
+		goHealth.ToolchainUpgradeEligible = true
+		goHealth.RecommendedToolchain = release.Version
+		goHealth.ToolchainOutdated = gorelease.ToolchainCompare(deps.Toolchain, release.Version) < 0
+	}
+	report.Go = goHealth
+	return nil
+}
+
+func (s *Scanner) enrichDependencyHealth(ctx context.Context, deps *dependency.Result, report *model.Report, opts Options) error {
+	if opts.NoHealth {
+		return nil
+	}
+	staleAfter := opts.StaleAfter
+	if staleAfter <= 0 {
+		staleAfter = 730 * 24 * time.Hour
+	}
+	cutoff := s.now().Add(-staleAfter)
+
+	latest := map[string]string{}
+	var latestMu sync.Mutex
+	var warningMu sync.Mutex
+	sem := make(chan struct{}, 8)
+	var wg sync.WaitGroup
+	for _, module := range report.Dependencies {
+		path, version, ok := module.ScanTarget()
+		if !ok || s.Versions == nil {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			v, err := s.Versions.Latest(ctx, deps.Root, path)
+			if err != nil {
+				warningMu.Lock()
+				report.Warnings = append(report.Warnings, err.Error())
+				warningMu.Unlock()
+				return
+			}
+			if goversion.Compare(v, version) >= 0 {
+				latestMu.Lock()
+				latest[path] = v
+				latestMu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+
+	modulePaths := make([]string, 0, len(report.Dependencies))
+	for _, module := range report.Dependencies {
+		path, _, ok := module.ScanTarget()
+		if ok {
+			modulePaths = append(modulePaths, path)
+		}
+	}
+	repositories := map[string]githubrepo.Record{}
+	var repoErr error
+	if s.Repositories != nil {
+		repositories, repoErr = s.Repositories.Query(ctx, modulePaths, cutoff)
+	} else if opts.RequireMaintained {
+		repoErr = fmt.Errorf("GitHub repository health source is not configured")
+	}
+
+	for _, module := range report.Dependencies {
+		path, version, ok := module.ScanTarget()
+		if !ok {
+			continue
+		}
+		var paths [][]model.ModuleRef
+		if deps.Graph != nil {
+			paths = deps.Graph.PathsTo(module.Path, 3)
+		}
+		health := model.DependencyHealth{
+			Module:     model.ModuleRef{Path: module.Path, Version: module.Version},
+			Kind:       module.Kind,
+			Paths:      paths,
+			Deprecated: module.Deprecated,
+		}
+		if latestVersion := latest[path]; latestVersion != "" {
+			health.LatestVersion = latestVersion
+			health.Outdated = goversion.Compare(version, latestVersion) < 0
+		}
+		if repo, ok := githubrepo.RepositoryFromModule(path); ok {
+			health.Repository = repo
+			if record, ok := repositories[repo]; ok {
+				health.RepositoryURL = record.URL
+				health.Archived = record.Archived
+				health.LastPush = record.PushedAt
+				health.Stale = !record.PushedAt.IsZero() && record.PushedAt.Before(cutoff)
+				health.Unmaintained = record.Archived || record.ExplicitUnmaintained
+				health.MaintenanceNotice = record.MaintenanceNotice
+			}
+		}
+		if health.Deprecated != "" {
+			report.Summary.Deprecated++
+		}
+		if health.Outdated {
+			report.Summary.OutdatedDependencies++
+		}
+		if health.Archived {
+			report.Summary.Archived++
+		}
+		if health.Stale {
+			report.Summary.Stale++
+		}
+		if health.Unmaintained {
+			report.Summary.Unmaintained++
+		}
+		if health.Deprecated != "" || health.Outdated || health.Archived || health.Stale || health.Unmaintained {
+			report.Health = append(report.Health, health)
+		}
+	}
+	sort.SliceStable(report.Health, func(i, j int) bool { return report.Health[i].Module.Path < report.Health[j].Module.Path })
+	if repoErr != nil {
+		return fmt.Errorf("dependency maintenance check failed: %w", repoErr)
+	}
+	return nil
+}
+
+// HealthExceeds reports whether configured runtime or maintenance policies should fail CI.
+func HealthExceeds(report *model.Report, requireCurrentGo, requireMaintained bool) bool {
+	if report == nil {
+		return false
+	}
+	if requireCurrentGo && report.Go != nil && (report.Go.DirectiveOutdated || report.Go.ToolchainOutdated || report.Go.Unsupported) {
+		return true
+	}
+	if requireMaintained && report.Summary.Unmaintained > 0 {
+		return true
+	}
+	return false
 }
 
 func applyIgnores(report *model.Report, rules map[string]string) {

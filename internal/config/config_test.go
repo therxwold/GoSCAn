@@ -22,6 +22,12 @@ ignore:
   show: true
   GO-2026-1234: "not reachable in our build"
   example.com/deep@CVE-2026-9999: "not affected on supported targets"
+health:
+  enabled: true
+  check_go: true
+  stale_after_days: 365
+  fail_on_outdated_go: true
+  fail_on_unmaintained: true
 scan:
   fail_on: "high"
   epss_threshold: 0.2
@@ -30,6 +36,9 @@ scan:
   timeout: "45s"
 fix:
   run_tests: false
+  vulnerabilities: false
+  upgrade_go: true
+  upgrade_toolchain: true
   timeout: "3m"
 output:
   format: "json"
@@ -47,10 +56,13 @@ output:
 	if cfg.EPSS.Enabled || !cfg.Ignore.Show || len(cfg.Ignore.Rules) != 2 || cfg.Ignore.Rules["GO-2026-1234"] != "not reachable in our build" {
 		t.Fatalf("unexpected ignore config: %#v", cfg.Ignore)
 	}
+	if !cfg.Health.Enabled || !cfg.Health.CheckGo || cfg.Health.StaleAfterDays != 365 || !cfg.Health.FailOnOutdatedGo || !cfg.Health.FailOnUnmaintained {
+		t.Fatalf("unexpected health config: %#v", cfg.Health)
+	}
 	if cfg.Scan.FailOn != "high" || cfg.Scan.EPSSThreshold != 0.2 || !cfg.Scan.ShowManifests || !cfg.Scan.StrictEnrichment || cfg.Scan.Timeout != 45*time.Second {
 		t.Fatalf("unexpected scan config: %#v", cfg)
 	}
-	if cfg.Fix.RunTests || cfg.Fix.Timeout != 3*time.Minute || cfg.Output.Format != "json" {
+	if cfg.Fix.RunTests || cfg.Fix.Vulnerabilities || !cfg.Fix.UpgradeGo || !cfg.Fix.UpgradeToolchain || cfg.Fix.Timeout != 3*time.Minute || cfg.Output.Format != "json" {
 		t.Fatalf("unexpected remaining config: %#v", cfg)
 	}
 }
@@ -180,5 +192,15 @@ func TestIgnoreReasonCannotExpandToEmpty(t *testing.T) {
 	}
 	if _, err := Load(path, true); err == nil {
 		t.Fatal("expected empty expanded ignore reason to fail")
+	}
+}
+
+func TestConfigRejectsInvalidStaleWindow(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yml")
+	if err := os.WriteFile(path, []byte("health:\n  stale_after_days: 0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path, true); err == nil {
+		t.Fatal("expected invalid stale window to fail")
 	}
 }

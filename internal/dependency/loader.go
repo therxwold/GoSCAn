@@ -24,21 +24,24 @@ type Loader struct {
 
 // Result contains the complete dependency information discovered for a Go module.
 type Result struct {
-	Root       string
-	MainModule string
-	Modules    []model.Module
-	Graph      *Graph
-	Warnings   []string
+	Root        string
+	MainModule  string
+	GoDirective string
+	Toolchain   string
+	Modules     []model.Module
+	Graph       *Graph
+	Warnings    []string
 }
 
 type goListModule struct {
-	Path      string        `json:"Path"`
-	Version   string        `json:"Version"`
-	Main      bool          `json:"Main"`
-	Dir       string        `json:"Dir"`
-	GoMod     string        `json:"GoMod"`
-	GoVersion string        `json:"GoVersion"`
-	Replace   *goListModule `json:"Replace"`
+	Path       string        `json:"Path"`
+	Version    string        `json:"Version"`
+	Main       bool          `json:"Main"`
+	Dir        string        `json:"Dir"`
+	GoMod      string        `json:"GoMod"`
+	GoVersion  string        `json:"GoVersion"`
+	Deprecated string        `json:"Deprecated"`
+	Replace    *goListModule `json:"Replace"`
 }
 
 // Load resolves every selected module and its dependency graph for dir.
@@ -59,6 +62,10 @@ func (l Loader) Load(ctx context.Context, dir string) (*Result, error) {
 	mainPath, mainRequirements, err := readManifest(gomod, nil)
 	if err != nil {
 		return nil, fmt.Errorf("read go.mod: %w", err)
+	}
+	goDirective, toolchain, err := readGoSettings(gomod)
+	if err != nil {
+		return nil, fmt.Errorf("read go.mod Go settings: %w", err)
 	}
 
 	listOut, err := l.Runner.Run(ctx, root, "go", "list", "-m", "-json", "all")
@@ -104,6 +111,7 @@ func (l Loader) Load(ctx context.Context, dir string) (*Result, error) {
 			Explicit:            explicit,
 			IndirectRequirement: indirectReq,
 			GoVersion:           m.GoVersion,
+			Deprecated:          m.Deprecated,
 		}
 		if m.Replace != nil {
 			mod.Replace = &model.ModuleRef{Path: m.Replace.Path, Version: m.Replace.Version}
@@ -150,7 +158,25 @@ func (l Loader) Load(ctx context.Context, dir string) (*Result, error) {
 		modules[i].ManifestAudited = manifestAudited[modules[i].Path]
 	}
 
-	return &Result{Root: root, MainModule: mainPath, Modules: modules, Graph: graph, Warnings: warnings}, nil
+	return &Result{Root: root, MainModule: mainPath, GoDirective: goDirective, Toolchain: toolchain, Modules: modules, Graph: graph, Warnings: warnings}, nil
+}
+
+func readGoSettings(path string) (goDirective, toolchain string, err error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", "", err
+	}
+	file, err := modfile.Parse(path, data, nil)
+	if err != nil {
+		return "", "", err
+	}
+	if file.Go != nil {
+		goDirective = file.Go.Version
+	}
+	if file.Toolchain != nil {
+		toolchain = file.Toolchain.Name
+	}
+	return goDirective, toolchain, nil
 }
 
 func decodeModuleStream(data []byte) ([]goListModule, error) {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/therxwold/GoSCAn/internal/model"
 )
@@ -81,6 +82,8 @@ func writeTerminal(w io.Writer, r *model.Report, opts WriteOptions) error {
 		fmt.Fprintf(w, " (%d ignored)", r.Summary.Ignored)
 	}
 	fmt.Fprintln(w)
+	writeGoHealth(w, r.Go)
+	writeDependencyHealth(w, r)
 	if len(r.Findings) == 0 {
 		fmt.Fprintln(w, "\nNo active known vulnerabilities found.")
 		if opts.ShowIgnored {
@@ -239,6 +242,94 @@ func writeManifests(w io.Writer, modules []model.Module) {
 	}
 }
 
+func writeGoHealth(w io.Writer, health *model.GoHealth) {
+	if health == nil {
+		return
+	}
+	fmt.Fprintln(w, "\nGo version:")
+	if health.Directive == "" {
+		fmt.Fprintf(w, "  go directive: unavailable (latest stable %s)\n", health.Latest)
+	} else if health.DirectiveOutdated {
+		status := "outdated"
+		if health.Unsupported {
+			status = "unsupported"
+		}
+		fmt.Fprintf(w, "  go:        %s -> %s (%s; latest stable %s)\n", health.Directive, health.RecommendedDirective, status, health.Latest)
+	} else {
+		fmt.Fprintf(w, "  go:        %s (current; latest stable %s)\n", health.Directive, health.Latest)
+	}
+	if health.Toolchain != "" {
+		switch {
+		case health.Toolchain == "default":
+			fmt.Fprintln(w, "  toolchain: default (automatic toolchain switching disabled)")
+		case health.ToolchainOutdated:
+			fmt.Fprintf(w, "  toolchain: %s -> %s\n", health.Toolchain, health.RecommendedToolchain)
+		default:
+			fmt.Fprintf(w, "  toolchain: %s (current)\n", health.Toolchain)
+		}
+	}
+}
+
+func writeDependencyHealth(w io.Writer, r *model.Report) {
+	if len(r.Health) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "\nDependency health: %d unmaintained, %d archived, %d stale, %d deprecated, %d outdated\n",
+		r.Summary.Unmaintained, r.Summary.Archived, r.Summary.Stale, r.Summary.Deprecated, r.Summary.OutdatedDependencies)
+	for _, health := range r.Health {
+		labels := make([]string, 0, 5)
+		if health.Unmaintained {
+			labels = append(labels, "UNMAINTAINED")
+		}
+		if health.Archived {
+			labels = append(labels, "ARCHIVED")
+		}
+		if health.Deprecated != "" {
+			labels = append(labels, "DEPRECATED")
+		}
+		if health.Stale {
+			labels = append(labels, "STALE")
+		}
+		if health.Outdated {
+			labels = append(labels, "OUTDATED")
+		}
+		fmt.Fprintf(w, "  %s  %s@%s", strings.Join(labels, "/"), health.Module.Path, health.Module.Version)
+		if health.Kind != "" {
+			fmt.Fprintf(w, " (%s)", health.Kind)
+		}
+		fmt.Fprintln(w)
+		if health.LatestVersion != "" && health.Outdated {
+			fmt.Fprintf(w, "    Latest: %s\n", health.LatestVersion)
+		}
+		if health.RepositoryURL != "" {
+			fmt.Fprintf(w, "    Repo:   %s\n", health.RepositoryURL)
+		}
+		if !health.LastPush.IsZero() && health.Stale {
+			fmt.Fprintf(w, "    Last push: %s\n", health.LastPush.UTC().Format("2006-01-02"))
+		}
+		if health.MaintenanceNotice != "" {
+			fmt.Fprintf(w, "    Notice: repository explicitly says %q\n", health.MaintenanceNotice)
+		}
+		if len(health.Paths) > 0 {
+			fmt.Fprintln(w, "    Path:")
+			for i, ref := range health.Paths[0] {
+				prefix := "      "
+				if i > 0 {
+					prefix += "└── "
+				}
+				label := ref.Path
+				if ref.Version != "" {
+					label += "@" + ref.Version
+				}
+				fmt.Fprintln(w, prefix+label)
+			}
+		}
+		if health.Deprecated != "" {
+			fmt.Fprintf(w, "    Deprecated: %s\n", health.Deprecated)
+		}
+	}
+}
+
 func writeIgnored(w io.Writer, findings []model.Finding) {
 	if len(findings) == 0 {
 		return
@@ -354,6 +445,62 @@ func writeSARIF(w io.Writer, r *model.Report, opts WriteOptions) error {
 		}
 		results = append(results, result)
 	}
+	if r.Go != nil {
+		if r.Go.Unsupported {
+			addSARIFHealth(&rules, &results, "GOSCAN-GO-UNSUPPORTED", "error",
+				fmt.Sprintf("go directive %s is outside the two currently supported Go release lines; upgrade to %s", r.Go.Directive, r.Go.RecommendedDirective),
+				map[string]any{"current": r.Go.Directive, "recommended": r.Go.RecommendedDirective, "latest": r.Go.Latest})
+		} else if r.Go.DirectiveOutdated {
+			addSARIFHealth(&rules, &results, "GOSCAN-GO-OUTDATED", "warning",
+				fmt.Sprintf("go directive %s can be upgraded to %s", r.Go.Directive, r.Go.RecommendedDirective),
+				map[string]any{"current": r.Go.Directive, "recommended": r.Go.RecommendedDirective, "latest": r.Go.Latest})
+		}
+		if r.Go.ToolchainOutdated {
+			addSARIFHealth(&rules, &results, "GOSCAN-TOOLCHAIN-OUTDATED", "warning",
+				fmt.Sprintf("toolchain %s can be upgraded to %s", r.Go.Toolchain, r.Go.RecommendedToolchain),
+				map[string]any{"current": r.Go.Toolchain, "recommended": r.Go.RecommendedToolchain})
+		}
+	}
+	for _, health := range r.Health {
+		props := map[string]any{"module": health.Module.Path, "version": health.Module.Version, "kind": health.Kind}
+		if len(health.Paths) > 0 {
+			props["dependencyPaths"] = health.Paths
+		}
+		if health.RepositoryURL != "" {
+			props["repository"] = health.RepositoryURL
+		}
+		if health.Unmaintained {
+			message := fmt.Sprintf("%s@%s is unmaintained", health.Module.Path, health.Module.Version)
+			if health.MaintenanceNotice != "" {
+				message += ": " + health.MaintenanceNotice
+			}
+			addSARIFHealth(&rules, &results, "GOSCAN-DEPENDENCY-UNMAINTAINED", "warning", message, props)
+		} else if health.Archived {
+			addSARIFHealth(&rules, &results, "GOSCAN-DEPENDENCY-ARCHIVED", "warning",
+				fmt.Sprintf("%s@%s repository is archived", health.Module.Path, health.Module.Version), props)
+		}
+		if health.Deprecated != "" {
+			deprecatedProps := cloneProperties(props)
+			deprecatedProps["deprecation"] = health.Deprecated
+			addSARIFHealth(&rules, &results, "GOSCAN-DEPENDENCY-DEPRECATED", "warning",
+				fmt.Sprintf("%s@%s is deprecated: %s", health.Module.Path, health.Module.Version, health.Deprecated), deprecatedProps)
+		}
+		if health.Stale && !health.Unmaintained {
+			staleProps := cloneProperties(props)
+			if !health.LastPush.IsZero() {
+				staleProps["lastPush"] = health.LastPush.UTC().Format(time.RFC3339)
+			}
+			addSARIFHealth(&rules, &results, "GOSCAN-DEPENDENCY-STALE", "note",
+				fmt.Sprintf("%s@%s has not received a recent repository push", health.Module.Path, health.Module.Version), staleProps)
+		}
+		if health.Outdated {
+			outdatedProps := cloneProperties(props)
+			outdatedProps["latestVersion"] = health.LatestVersion
+			addSARIFHealth(&rules, &results, "GOSCAN-DEPENDENCY-OUTDATED", "note",
+				fmt.Sprintf("%s@%s has newer version %s", health.Module.Path, health.Module.Version, health.LatestVersion), outdatedProps)
+		}
+	}
+
 	ruleList := make([]sarifRule, 0, len(rules))
 	for _, rule := range rules {
 		ruleList = append(ruleList, rule)
@@ -362,6 +509,25 @@ func writeSARIF(w io.Writer, r *model.Report, opts WriteOptions) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(log)
+}
+
+func addSARIFHealth(rules *map[string]sarifRule, results *[]sarifResult, id, level, message string, properties map[string]any) {
+	(*rules)[id] = sarifRule{ID: id, ShortDescription: sarifMessage{Text: message}}
+	*results = append(*results, sarifResult{
+		RuleID:     id,
+		Level:      level,
+		Message:    sarifMessage{Text: message},
+		Locations:  []sarifLocation{{PhysicalLocation: sarifPhysicalLocation{ArtifactLocation: sarifArtifactLocation{URI: "go.mod"}}}},
+		Properties: properties,
+	})
+}
+
+func cloneProperties(in map[string]any) map[string]any {
+	out := make(map[string]any, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
 }
 
 func sarifLevel(s model.Severity) string {

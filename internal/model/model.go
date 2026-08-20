@@ -73,6 +73,7 @@ type Module struct {
 	Explicit            bool                `json:"explicit,omitempty"`
 	IndirectRequirement bool                `json:"indirect_requirement,omitempty"`
 	GoVersion           string              `json:"go_version,omitempty"`
+	Deprecated          string              `json:"deprecated,omitempty"`
 	ManifestAudited     bool                `json:"manifest_audited"`
 	Requires            []ModuleRequirement `json:"requires,omitempty"`
 	Replace             *ModuleRef          `json:"replace,omitempty"`
@@ -180,6 +181,36 @@ type Finding struct {
 	IgnoreReason  string             `json:"ignore_reason,omitempty"`
 }
 
+// GoHealth describes the main module's Go language and toolchain freshness.
+type GoHealth struct {
+	Directive                string `json:"directive,omitempty"`
+	Toolchain                string `json:"toolchain,omitempty"`
+	Latest                   string `json:"latest,omitempty"`
+	RecommendedDirective     string `json:"recommended_directive,omitempty"`
+	RecommendedToolchain     string `json:"recommended_toolchain,omitempty"`
+	DirectiveOutdated        bool   `json:"directive_outdated,omitempty"`
+	ToolchainOutdated        bool   `json:"toolchain_outdated,omitempty"`
+	Unsupported              bool   `json:"unsupported,omitempty"`
+	ToolchainUpgradeEligible bool   `json:"toolchain_upgrade_eligible,omitempty"`
+}
+
+// DependencyHealth describes version and maintenance concerns for one selected dependency.
+type DependencyHealth struct {
+	Module            ModuleRef      `json:"module"`
+	Kind              DependencyKind `json:"kind"`
+	Paths             [][]ModuleRef  `json:"paths,omitempty"`
+	Repository        string         `json:"repository,omitempty"`
+	RepositoryURL     string         `json:"repository_url,omitempty"`
+	LatestVersion     string         `json:"latest_version,omitempty"`
+	Outdated          bool           `json:"outdated,omitempty"`
+	Deprecated        string         `json:"deprecated,omitempty"`
+	Archived          bool           `json:"archived,omitempty"`
+	Stale             bool           `json:"stale,omitempty"`
+	Unmaintained      bool           `json:"unmaintained,omitempty"`
+	MaintenanceNotice string         `json:"maintenance_notice,omitempty"`
+	LastPush          time.Time      `json:"last_push,omitempty"`
+}
+
 // Summary contains dependency and vulnerability counts for a scan.
 type Summary struct {
 	Modules        int `json:"modules"`
@@ -196,17 +227,25 @@ type Summary struct {
 	Low      int `json:"low"`
 	Unknown  int `json:"unknown"`
 	Ignored  int `json:"ignored"`
+
+	OutdatedDependencies int `json:"outdated_dependencies"`
+	Unmaintained         int `json:"unmaintained"`
+	Archived             int `json:"archived"`
+	Stale                int `json:"stale"`
+	Deprecated           int `json:"deprecated"`
 }
 
 // Report is the complete result of a GoSCAn dependency vulnerability scan.
 type Report struct {
-	Root            string    `json:"-"`
-	ToolVersion     string    `json:"tool_version"`
-	Module          string    `json:"module"`
-	ScannedAt       time.Time `json:"scanned_at"`
-	Summary         Summary   `json:"summary"`
-	Dependencies    []Module  `json:"dependencies,omitempty"`
-	Findings        []Finding `json:"findings"`
-	IgnoredFindings []Finding `json:"ignored_findings,omitempty"`
-	Warnings        []string  `json:"warnings,omitempty"`
+	Root            string             `json:"-"`
+	ToolVersion     string             `json:"tool_version"`
+	Module          string             `json:"module"`
+	ScannedAt       time.Time          `json:"scanned_at"`
+	Summary         Summary            `json:"summary"`
+	Dependencies    []Module           `json:"dependencies,omitempty"`
+	Go              *GoHealth          `json:"go,omitempty"`
+	Health          []DependencyHealth `json:"health,omitempty"`
+	Findings        []Finding          `json:"findings"`
+	IgnoredFindings []Finding          `json:"ignored_findings,omitempty"`
+	Warnings        []string           `json:"warnings,omitempty"`
 }

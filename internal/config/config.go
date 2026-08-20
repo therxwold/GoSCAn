@@ -17,6 +17,7 @@ type Config struct {
 	NVD    NVDConfig
 	EPSS   EPSSConfig
 	Ignore IgnoreConfig
+	Health HealthConfig
 	Scan   ScanConfig
 	Fix    FixConfig
 	Output OutputConfig
@@ -45,6 +46,15 @@ type IgnoreConfig struct {
 	Rules map[string]string
 }
 
+// HealthConfig controls Go runtime and dependency maintenance checks.
+type HealthConfig struct {
+	Enabled            bool
+	CheckGo            bool
+	StaleAfterDays     int
+	FailOnOutdatedGo   bool
+	FailOnUnmaintained bool
+}
+
 // ScanConfig contains defaults used by the scan command.
 type ScanConfig struct {
 	FailOn           string
@@ -56,8 +66,11 @@ type ScanConfig struct {
 
 // FixConfig contains defaults used by the fix command.
 type FixConfig struct {
-	RunTests bool
-	Timeout  time.Duration
+	RunTests         bool
+	Vulnerabilities  bool
+	UpgradeGo        bool
+	UpgradeToolchain bool
+	Timeout          time.Duration
 }
 
 // OutputConfig contains report output defaults.
@@ -78,7 +91,14 @@ type fileConfig struct {
 		Enabled *bool `yaml:"enabled"`
 	} `yaml:"epss"`
 	Ignore map[string]any `yaml:"ignore"`
-	Scan   *struct {
+	Health *struct {
+		Enabled            *bool `yaml:"enabled"`
+		CheckGo            *bool `yaml:"check_go"`
+		StaleAfterDays     *int  `yaml:"stale_after_days"`
+		FailOnOutdatedGo   *bool `yaml:"fail_on_outdated_go"`
+		FailOnUnmaintained *bool `yaml:"fail_on_unmaintained"`
+	} `yaml:"health"`
+	Scan *struct {
 		FailOn           *string  `yaml:"fail_on"`
 		EPSSThreshold    *float64 `yaml:"epss_threshold"`
 		ShowManifests    *bool    `yaml:"show_manifests"`
@@ -86,8 +106,11 @@ type fileConfig struct {
 		Timeout          *string  `yaml:"timeout"`
 	} `yaml:"scan"`
 	Fix *struct {
-		RunTests *bool   `yaml:"run_tests"`
-		Timeout  *string `yaml:"timeout"`
+		RunTests         *bool   `yaml:"run_tests"`
+		Vulnerabilities  *bool   `yaml:"vulnerabilities"`
+		UpgradeGo        *bool   `yaml:"upgrade_go"`
+		UpgradeToolchain *bool   `yaml:"upgrade_toolchain"`
+		Timeout          *string `yaml:"timeout"`
 	} `yaml:"fix"`
 	Output *struct {
 		Format *string `yaml:"format"`
@@ -101,14 +124,16 @@ func Default() Config {
 		NVD:    NVDConfig{Enabled: true},
 		EPSS:   EPSSConfig{Enabled: true},
 		Ignore: IgnoreConfig{Rules: map[string]string{}},
+		Health: HealthConfig{Enabled: true, CheckGo: true, StaleAfterDays: 730},
 		Scan: ScanConfig{
 			FailOn:        "none",
 			EPSSThreshold: -1,
 			Timeout:       2 * time.Minute,
 		},
 		Fix: FixConfig{
-			RunTests: true,
-			Timeout:  5 * time.Minute,
+			RunTests:        true,
+			Vulnerabilities: true,
+			Timeout:         5 * time.Minute,
 		},
 		Output: OutputConfig{Format: "terminal"},
 	}
@@ -171,12 +196,18 @@ func decodeYAML(data []byte, cfg *Config) error {
 	if err := dec.Decode(&raw); err != nil {
 		return err
 	}
-	var extra any
-	if err := dec.Decode(&extra); err != io.EOF {
+	for {
+		var extra any
+		err := dec.Decode(&extra)
+		if err == io.EOF {
+			break
+		}
 		if err != nil {
 			return err
 		}
-		return fmt.Errorf("multiple YAML documents are not supported")
+		if extra != nil {
+			return fmt.Errorf("multiple YAML documents are not supported")
+		}
 	}
 	return mergeFileConfig(cfg, raw)
 }
@@ -225,6 +256,26 @@ func mergeFileConfig(cfg *Config, raw fileConfig) error {
 			cfg.Ignore.Rules[strings.TrimSpace(key)] = reason
 		}
 	}
+	if raw.Health != nil {
+		if raw.Health.Enabled != nil {
+			cfg.Health.Enabled = *raw.Health.Enabled
+		}
+		if raw.Health.CheckGo != nil {
+			cfg.Health.CheckGo = *raw.Health.CheckGo
+		}
+		if raw.Health.StaleAfterDays != nil {
+			if *raw.Health.StaleAfterDays <= 0 {
+				return fmt.Errorf("health.stale_after_days must be greater than zero")
+			}
+			cfg.Health.StaleAfterDays = *raw.Health.StaleAfterDays
+		}
+		if raw.Health.FailOnOutdatedGo != nil {
+			cfg.Health.FailOnOutdatedGo = *raw.Health.FailOnOutdatedGo
+		}
+		if raw.Health.FailOnUnmaintained != nil {
+			cfg.Health.FailOnUnmaintained = *raw.Health.FailOnUnmaintained
+		}
+	}
 	if raw.Scan != nil {
 		if raw.Scan.FailOn != nil {
 			cfg.Scan.FailOn = *raw.Scan.FailOn
@@ -252,6 +303,15 @@ func mergeFileConfig(cfg *Config, raw fileConfig) error {
 	if raw.Fix != nil {
 		if raw.Fix.RunTests != nil {
 			cfg.Fix.RunTests = *raw.Fix.RunTests
+		}
+		if raw.Fix.Vulnerabilities != nil {
+			cfg.Fix.Vulnerabilities = *raw.Fix.Vulnerabilities
+		}
+		if raw.Fix.UpgradeGo != nil {
+			cfg.Fix.UpgradeGo = *raw.Fix.UpgradeGo
+		}
+		if raw.Fix.UpgradeToolchain != nil {
+			cfg.Fix.UpgradeToolchain = *raw.Fix.UpgradeToolchain
 		}
 		if raw.Fix.Timeout != nil {
 			v, err := time.ParseDuration(*raw.Fix.Timeout)

@@ -8,10 +8,12 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/therxwold/GoSCAn/internal/config"
 	"github.com/therxwold/GoSCAn/internal/fixer"
 	"github.com/therxwold/GoSCAn/internal/githubadvisory"
+	"github.com/therxwold/GoSCAn/internal/githubrepo"
 	"github.com/therxwold/GoSCAn/internal/nvd"
 	"github.com/therxwold/GoSCAn/internal/output"
 	"github.com/therxwold/GoSCAn/internal/scanner"
@@ -69,6 +71,13 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 	showIgnored := fs.Bool("show-ignored", cfg.Ignore.Show, "show findings suppressed as false positives")
 	showManifests := fs.Bool("show-manifests", cfg.Scan.ShowManifests, "show requirements declared by selected dependency manifests")
 	strictEnrichment := fs.Bool("strict-enrichment", cfg.Scan.StrictEnrichment, "fail when an enabled enrichment source is unavailable")
+	healthEnabled := fs.Bool("health", cfg.Health.Enabled, "enable dependency maintenance health checks")
+	noHealth := fs.Bool("no-health", false, "disable dependency maintenance health checks")
+	goVersionEnabled := fs.Bool("go-version", cfg.Health.CheckGo, "check the main module Go version against the latest stable release")
+	noGoVersion := fs.Bool("no-go-version", false, "disable Go language/toolchain version checking")
+	staleAfterDays := fs.Int("stale-after-days", cfg.Health.StaleAfterDays, "flag GitHub dependencies with no pushes for this many days")
+	failOnOutdatedGo := fs.Bool("fail-on-outdated-go", cfg.Health.FailOnOutdatedGo, "exit 1 when the go directive or toolchain is behind current stable Go")
+	failOnUnmaintained := fs.Bool("fail-on-unmaintained", cfg.Health.FailOnUnmaintained, "exit 1 when a dependency is explicitly unmaintained or archived")
 	fs.Func("ignore", "ignore advisory ID or module@ID; append =reason if wanted; repeatable", func(value string) error {
 		return addIgnoreRule(ignoreRules, value)
 	})
@@ -97,6 +106,12 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 	if *noNVD {
 		*nvdEnabled = false
 	}
+	if *noHealth {
+		*healthEnabled = false
+	}
+	if *noGoVersion {
+		*goVersionEnabled = false
+	}
 
 	format, err := output.ParseFormat(*formatName)
 	if err != nil {
@@ -116,8 +131,20 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "--epss-threshold requires EPSS enrichment")
 		return 2
 	}
+	if !*goVersionEnabled && *failOnOutdatedGo {
+		fmt.Fprintln(stderr, "--fail-on-outdated-go requires Go version checking")
+		return 2
+	}
+	if !*healthEnabled && *failOnUnmaintained {
+		fmt.Fprintln(stderr, "--fail-on-unmaintained requires dependency health checks")
+		return 2
+	}
 	if *timeout <= 0 {
 		fmt.Fprintln(stderr, "--timeout must be greater than zero")
+		return 2
+	}
+	if *staleAfterDays <= 0 {
+		fmt.Fprintln(stderr, "--stale-after-days must be greater than zero")
 		return 2
 	}
 
@@ -128,9 +155,13 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 	s.ToolVersion = strings.TrimPrefix(Version, "v")
 	s.GitHub = githubadvisory.Client{Token: cfg.GitHub.Token}
 	s.NVD = nvd.Client{APIKey: cfg.NVD.APIKey}
+	s.Repositories = githubrepo.Client{Token: cfg.GitHub.Token}
 	report, err := s.Scan(ctx, dir, scanner.Options{
 		NoGitHub: !*githubEnabled, NoNVD: !*nvdEnabled, NoEPSS: *noEPSS,
-		StrictEnrichment: *strictEnrichment, RequireEPSS: *epssThreshold >= 0, IgnoreRules: ignoreRules,
+		StrictEnrichment: *strictEnrichment, RequireEPSS: *epssThreshold >= 0,
+		NoHealth: !*healthEnabled, NoGoVersion: !*goVersionEnabled,
+		RequireCurrentGo: *failOnOutdatedGo, RequireMaintained: *failOnUnmaintained,
+		StaleAfter: time.Duration(*staleAfterDays) * 24 * time.Hour, IgnoreRules: ignoreRules,
 	})
 	if err != nil {
 		fmt.Fprintln(stderr, "goscan:", err)
@@ -140,7 +171,7 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "goscan:", err)
 		return 2
 	}
-	if scanner.Exceeds(report, sev, *epssThreshold) {
+	if scanner.Exceeds(report, sev, *epssThreshold) || scanner.HealthExceeds(report, *failOnOutdatedGo, *failOnUnmaintained) {
 		return 1
 	}
 	return 0
@@ -168,6 +199,14 @@ func runFix(args []string, stdout, stderr io.Writer) int {
 	showIgnored := fs.Bool("show-ignored", cfg.Ignore.Show, "show findings suppressed as false positives")
 	showManifests := fs.Bool("show-manifests", cfg.Scan.ShowManifests, "show requirements declared by selected dependency manifests")
 	strictEnrichment := fs.Bool("strict-enrichment", cfg.Scan.StrictEnrichment, "fail when an enabled enrichment source is unavailable")
+	healthEnabled := fs.Bool("health", cfg.Health.Enabled, "enable dependency maintenance health checks")
+	noHealth := fs.Bool("no-health", false, "disable dependency maintenance health checks")
+	goVersionEnabled := fs.Bool("go-version", cfg.Health.CheckGo, "check the main module Go version against the latest stable release")
+	noGoVersion := fs.Bool("no-go-version", false, "disable Go language/toolchain version checking")
+	staleAfterDays := fs.Int("stale-after-days", cfg.Health.StaleAfterDays, "flag GitHub dependencies with no pushes for this many days")
+	fixVulnerabilities := fs.Bool("vulnerabilities", cfg.Fix.Vulnerabilities, "apply available vulnerability fixes")
+	upgradeGo := fs.Bool("upgrade-go", cfg.Fix.UpgradeGo, "upgrade the main go directive to the latest stable Go release")
+	upgradeToolchain := fs.Bool("upgrade-toolchain", cfg.Fix.UpgradeToolchain, "upgrade an existing toolchain directive to the latest stable Go toolchain")
 	fs.Func("ignore", "ignore advisory ID or module@ID; append =reason if wanted; repeatable", func(value string) error {
 		return addIgnoreRule(ignoreRules, value)
 	})
@@ -194,6 +233,12 @@ func runFix(args []string, stdout, stderr io.Writer) int {
 	if *noNVD {
 		*nvdEnabled = false
 	}
+	if *noHealth {
+		*healthEnabled = false
+	}
+	if *noGoVersion {
+		*goVersionEnabled = false
+	}
 
 	format, err := output.ParseFormat(*formatName)
 	if err != nil {
@@ -204,6 +249,10 @@ func runFix(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "--timeout must be greater than zero")
 		return 2
 	}
+	if *staleAfterDays <= 0 {
+		fmt.Fprintln(stderr, "--stale-after-days must be greater than zero")
+		return 2
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
@@ -212,13 +261,15 @@ func runFix(args []string, stdout, stderr io.Writer) int {
 	s.ToolVersion = strings.TrimPrefix(Version, "v")
 	s.GitHub = githubadvisory.Client{Token: cfg.GitHub.Token}
 	s.NVD = nvd.Client{APIKey: cfg.NVD.APIKey}
-	opts := scanner.Options{NoGitHub: !*githubEnabled, NoNVD: !*nvdEnabled, NoEPSS: *noEPSS, StrictEnrichment: *strictEnrichment, IgnoreRules: ignoreRules}
+	s.Repositories = githubrepo.Client{Token: cfg.GitHub.Token}
+	opts := scanner.Options{NoGitHub: !*githubEnabled, NoNVD: !*nvdEnabled, NoEPSS: *noEPSS, StrictEnrichment: *strictEnrichment,
+		NoHealth: !*healthEnabled, NoGoVersion: !*goVersionEnabled, StaleAfter: time.Duration(*staleAfterDays) * 24 * time.Hour, IgnoreRules: ignoreRules}
 	report, err := s.Scan(ctx, dir, opts)
 	if err != nil {
 		fmt.Fprintln(stderr, "goscan:", err)
 		return 2
 	}
-	if !*apply || len(report.Findings) == 0 {
+	if !*apply {
 		if err := output.Write(stdout, report, format, output.WriteOptions{ShowIgnored: *showIgnored, ShowManifests: *showManifests}); err != nil {
 			fmt.Fprintln(stderr, err)
 			return 2
@@ -226,9 +277,27 @@ func runFix(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 
-	if err := (fixer.Applier{}).Apply(ctx, report.Root, report.Findings, *runTests); err != nil {
+	applier := fixer.Applier{}
+	applied := false
+	if *fixVulnerabilities && fixer.HasApplicable(report.Findings) {
+		if err := applier.Apply(ctx, report.Root, report.Findings, *runTests); err != nil {
+			fmt.Fprintln(stderr, "goscan fix:", err)
+			return 2
+		}
+		applied = true
+	}
+	goApplied, err := applier.ApplyGo(ctx, report.Root, report.Go, *upgradeGo, *upgradeToolchain, *runTests)
+	if err != nil {
 		fmt.Fprintln(stderr, "goscan fix:", err)
 		return 2
+	}
+	applied = applied || goApplied
+	if !applied {
+		if err := output.Write(stdout, report, format, output.WriteOptions{ShowIgnored: *showIgnored, ShowManifests: *showManifests}); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 2
+		}
+		return 0
 	}
 	fmt.Fprintln(stderr, "goscan: fixes applied; rescanning")
 	post, err := s.Scan(ctx, dir, opts)
@@ -327,8 +396,10 @@ Examples:
   goscan scan --ignore GO-2026-1234
   goscan scan --show-ignored
   goscan scan --show-manifests
+  goscan scan --fail-on-outdated-go --fail-on-unmaintained
   goscan scan --config=config.yml
   goscan scan --format=sarif > goscan.sarif
   goscan fix
-  goscan fix --apply`)
+  goscan fix --apply
+  goscan fix --apply --upgrade-go --upgrade-toolchain`)
 }

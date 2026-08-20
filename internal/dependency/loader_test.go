@@ -34,6 +34,8 @@ func TestLoaderClassifiesEverySelectedModule(t *testing.T) {
 
 go 1.26
 
+toolchain go1.26.1
+
 require (
 	example.com/direct v1.0.0
 	example.com/indirect v1.0.0 // indirect
@@ -58,12 +60,15 @@ require (
 
 	r := fakeRunner{
 		"go env GOMOD":         []byte(mainMod + "\n"),
-		"go list -m -json all": []byte(fmt.Sprintf("{\"Path\":\"example.com/app\",\"Main\":true,\"GoMod\":%q,\"GoVersion\":\"1.26\"}\n{\"Path\":\"example.com/direct\",\"Version\":\"v1.0.0\",\"GoMod\":%q,\"GoVersion\":\"1.22\"}\n{\"Path\":\"example.com/indirect\",\"Version\":\"v1.0.0\",\"GoMod\":%q,\"GoVersion\":\"1.21\"}\n{\"Path\":\"example.com/deep\",\"Version\":\"v2.0.0\",\"GoMod\":%q,\"GoVersion\":\"1.20\"}\n", mainMod, directMod, indirectMod, deepMod)),
+		"go list -m -json all": []byte(fmt.Sprintf("{\"Path\":\"example.com/app\",\"Main\":true,\"GoMod\":%q,\"GoVersion\":\"1.26\"}\n{\"Path\":\"example.com/direct\",\"Version\":\"v1.0.0\",\"GoMod\":%q,\"GoVersion\":\"1.22\",\"Deprecated\":\"use example.com/new instead\"}\n{\"Path\":\"example.com/indirect\",\"Version\":\"v1.0.0\",\"GoMod\":%q,\"GoVersion\":\"1.21\"}\n{\"Path\":\"example.com/deep\",\"Version\":\"v2.0.0\",\"GoMod\":%q,\"GoVersion\":\"1.20\"}\n", mainMod, directMod, indirectMod, deepMod)),
 		"go mod graph":         []byte("example.com/app example.com/direct@v1.0.0\nexample.com/direct@v1.0.0 example.com/deep@v1.5.0\nexample.com/direct@v0.9.0 example.com/indirect@v1.0.0\nexample.com/app example.com/indirect@v1.0.0\n"),
 	}
 	res, err := (Loader{Runner: r}).Load(context.Background(), ".")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if res.GoDirective != "1.26" || res.Toolchain != "go1.26.1" {
+		t.Fatalf("go settings: directive=%q toolchain=%q", res.GoDirective, res.Toolchain)
 	}
 	got := map[string]model.DependencyKind{}
 	for _, m := range res.Modules {
@@ -89,7 +94,7 @@ require (
 			direct = module
 		}
 	}
-	if direct.GoVersion != "1.22" || !direct.ManifestAudited {
+	if direct.GoVersion != "1.22" || direct.Deprecated != "use example.com/new instead" || !direct.ManifestAudited {
 		t.Fatalf("manifest metadata=%+v", direct)
 	}
 	if len(direct.Requires) != 2 {

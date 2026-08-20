@@ -12,7 +12,19 @@ func sampleReport() *model.Report {
 	return &model.Report{
 		ToolVersion: "0.1.0",
 		Module:      "example.com/app",
-		Summary:     model.Summary{Modules: 2, Direct: 1, Transitive: 1, High: 1},
+		Summary:     model.Summary{Modules: 2, Direct: 1, Transitive: 1, High: 1, Unmaintained: 1, Stale: 1, OutdatedDependencies: 1},
+		Go:          &model.GoHealth{Directive: "1.18", Latest: "go1.26.6", RecommendedDirective: "1.26", DirectiveOutdated: true, Unsupported: true},
+		Health: []model.DependencyHealth{{
+			Module: model.ModuleRef{Path: "github.com/go-martini/martini", Version: "v0.0.0-20170121215854-22fa46961aab"},
+			Kind:   model.DependencyTransitive,
+			Paths: [][]model.ModuleRef{{
+				{Path: "example.com/app"},
+				{Path: "example.com/parent", Version: "v1.0.0"},
+				{Path: "github.com/go-martini/martini", Version: "v0.0.0-20170121215854-22fa46961aab"},
+			}},
+			Repository: "go-martini/martini", RepositoryURL: "https://github.com/go-martini/martini",
+			Unmaintained: true, Stale: true, MaintenanceNotice: "no longer maintained", LatestVersion: "v1.0.0", Outdated: true,
+		}},
 		Dependencies: []model.Module{
 			{
 				Path: "example.com/parent", Version: "v1.0.0", Kind: model.DependencyDirect, GoVersion: "1.22", ManifestAudited: true,
@@ -48,7 +60,7 @@ func TestTerminalContainsGoModRecommendation(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := b.String()
-	for _, want := range []string{"TRANSITIVE", "go.mod recommendation", "// indirect", "EPSS", "CWE-400", "github", "CISA KEV", "Declared by", "example.com/parent@v1.0.0 requires golang.org/x/net@v0.18.0 (selected v0.20.0)"} {
+	for _, want := range []string{"TRANSITIVE", "go.mod recommendation", "// indirect", "EPSS", "CWE-400", "github", "CISA KEV", "Declared by", "example.com/parent@v1.0.0 requires golang.org/x/net@v0.18.0 (selected v0.20.0)", "Go version", "1.18 -> 1.26", "UNMAINTAINED", "no longer maintained", "(transitive)", "example.com/parent@v1.0.0"} {
 		if !strings.Contains(strings.ToUpper(s), strings.ToUpper(want)) {
 			t.Fatalf("missing %q in %s", want, s)
 		}
@@ -160,6 +172,18 @@ func TestSARIFCanMarkIgnoredFindingAsSuppressed(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{`"suppressions"`, `"kind": "external"`, `"status": "accepted"`, `"justification": "accepted false positive"`} {
+		if !strings.Contains(b.String(), want) {
+			t.Fatalf("missing %s in %s", want, b.String())
+		}
+	}
+}
+
+func TestSARIFIncludesRuntimeAndDependencyHealth(t *testing.T) {
+	var b bytes.Buffer
+	if err := Write(&b, sampleReport(), FormatSARIF); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"ruleId": "GOSCAN-GO-UNSUPPORTED"`, `"ruleId": "GOSCAN-DEPENDENCY-UNMAINTAINED"`, `"ruleId": "GOSCAN-DEPENDENCY-OUTDATED"`} {
 		if !strings.Contains(b.String(), want) {
 			t.Fatalf("missing %s in %s", want, b.String())
 		}

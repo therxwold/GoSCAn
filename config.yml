@@ -19,6 +19,15 @@ ignore:
   # GO-2026-1234: "vulnerable code path is not reachable in this application"
   # golang.org/x/net@CVE-2026-12345: "not affected on supported targets"
 
+# Dependency and Go release health is reported separately from CVEs.
+health:
+  enabled: true
+  check_go: true
+  # GitHub repositories with no pushes inside this window are reported as stale.
+  stale_after_days: 730
+  fail_on_outdated_go: false
+  fail_on_unmaintained: false
+
 scan:
   fail_on: "none"
   epss_threshold: -1
@@ -28,6 +37,11 @@ scan:
 
 fix:
   run_tests: true
+  vulnerabilities: true
+  # These are opt-in locally. The GitHub Action has separate PR category inputs.
+  upgrade_go: false
+  # Only updates toolchain when the main go.mod already has a toolchain directive.
+  upgrade_toolchain: false
   timeout: "5m"
 
 output:

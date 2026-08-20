@@ -21,6 +21,16 @@ type fileBackup struct {
 	existed bool
 }
 
+// HasApplicable reports whether findings contain at least one automatic module fix.
+func HasApplicable(findings []model.Finding) bool {
+	for _, f := range findings {
+		if f.Fix != nil && f.Fix.To != "" && f.Module.Replace == nil {
+			return true
+		}
+	}
+	return false
+}
+
 // Apply applies deduplicated fixes, tidies the module, optionally runs tests, and restores module files on failure.
 func (a Applier) Apply(ctx context.Context, root string, findings []model.Finding, runTests bool) error {
 	if a.Runner == nil {

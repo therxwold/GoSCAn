@@ -9,6 +9,8 @@ import (
 
 	"github.com/therxwold/GoSCAn/internal/dependency"
 	"github.com/therxwold/GoSCAn/internal/githubadvisory"
+	"github.com/therxwold/GoSCAn/internal/githubrepo"
+	"github.com/therxwold/GoSCAn/internal/gorelease"
 	"github.com/therxwold/GoSCAn/internal/model"
 	"github.com/therxwold/GoSCAn/internal/nvd"
 	"github.com/therxwold/GoSCAn/internal/osv"
@@ -273,5 +275,158 @@ func TestRequiredEPSSFailsClosed(t *testing.T) {
 	}
 	if _, err := s.Scan(context.Background(), ".", Options{NoGitHub: true, NoNVD: true, RequireEPSS: true}); err == nil || !strings.Contains(err.Error(), "EPSS enrichment failed") {
 		t.Fatalf("expected required EPSS error, got %v", err)
+	}
+}
+
+type fakeGoRelease struct{}
+
+func (fakeGoRelease) Latest(context.Context) (gorelease.Release, error) {
+	return gorelease.Release{Version: "go1.26.6", LanguageVersion: "1.26"}, nil
+}
+
+type fakeRepositories struct{}
+
+func (fakeRepositories) Query(context.Context, []string, time.Time) (map[string]githubrepo.Record, error) {
+	return map[string]githubrepo.Record{
+		"go-martini/martini": {
+			Repository:           "go-martini/martini",
+			URL:                  "https://github.com/go-martini/martini",
+			PushedAt:             time.Date(2016, 11, 1, 0, 0, 0, 0, time.UTC),
+			ExplicitUnmaintained: true,
+			MaintenanceNotice:    "no longer maintained",
+		},
+	}, nil
+}
+
+type healthLatest struct{}
+
+func (healthLatest) Latest(_ context.Context, _ string, module string) (string, error) {
+	if module == "github.com/go-martini/martini" {
+		return "v0.0.0-20170121215854-22fa46961aab", nil
+	}
+	return "", nil
+}
+
+func TestScanFlagsGo118AndUnmaintainedMartiniFixture(t *testing.T) {
+	g := dependency.ParseGraph([]byte("filemanager github.com/go-martini/martini@v0.0.0-20170121215854-22fa46961aab\n"), map[string]string{
+		"filemanager": "", "github.com/go-martini/martini": "v0.0.0-20170121215854-22fa46961aab",
+	})
+	g.AddRoot("filemanager")
+	s := &Scanner{
+		Dependencies: fakeDeps{&dependency.Result{Root: "/x", MainModule: "filemanager", GoDirective: "1.18", Modules: []model.Module{
+			{Path: "filemanager", Main: true, Kind: model.DependencyMain},
+			{Path: "github.com/go-martini/martini", Version: "v0.0.0-20170121215854-22fa46961aab", Kind: model.DependencyDirect, ManifestAudited: true},
+		}, Graph: g}},
+		Vulnerabilities: fakeVulns{}, GoReleases: fakeGoRelease{}, Repositories: fakeRepositories{}, Versions: healthLatest{},
+		Now: func() time.Time { return time.Date(2026, 8, 21, 0, 0, 0, 0, time.UTC) },
+	}
+	r, err := s.Scan(context.Background(), ".", Options{NoGitHub: true, NoNVD: true, NoEPSS: true, StaleAfter: 730 * 24 * time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Go == nil || !r.Go.DirectiveOutdated || !r.Go.Unsupported || r.Go.RecommendedDirective != "1.26" {
+		t.Fatalf("go health=%+v", r.Go)
+	}
+	if r.Summary.Unmaintained != 1 || r.Summary.Stale != 1 || len(r.Health) != 1 {
+		t.Fatalf("health summary=%+v findings=%+v", r.Summary, r.Health)
+	}
+	if !r.Health[0].Unmaintained || r.Health[0].MaintenanceNotice != "no longer maintained" {
+		t.Fatalf("dependency health=%+v", r.Health[0])
+	}
+	if !HealthExceeds(r, true, true) {
+		t.Fatal("health policies should fail")
+	}
+}
+
+type transitiveHealthLatest struct{}
+
+func (transitiveHealthLatest) Latest(_ context.Context, _ string, module string) (string, error) {
+	switch module {
+	case "github.com/acme/parent":
+		return "v1.0.0", nil
+	case "github.com/acme/transitive":
+		return "v1.2.0", nil
+	default:
+		return "", nil
+	}
+}
+
+type transitiveHealthRepositories struct{}
+
+func (transitiveHealthRepositories) Query(_ context.Context, modules []string, _ time.Time) (map[string]githubrepo.Record, error) {
+	found := false
+	for _, module := range modules {
+		if module == "github.com/acme/transitive" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return nil, errors.New("transitive module was not included in maintenance scan")
+	}
+	return map[string]githubrepo.Record{
+		"acme/transitive": {
+			Repository:           "acme/transitive",
+			URL:                  "https://github.com/acme/transitive",
+			PushedAt:             time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC),
+			ExplicitUnmaintained: true,
+			MaintenanceNotice:    "no longer maintained",
+		},
+	}, nil
+}
+
+func TestScanChecksSelectedTransitiveDependencyHealth(t *testing.T) {
+	selected := map[string]string{
+		"example.com/app":            "",
+		"github.com/acme/parent":     "v1.0.0",
+		"github.com/acme/transitive": "v1.2.0",
+	}
+	g := dependency.ParseGraph([]byte(
+		"example.com/app github.com/acme/parent@v1.0.0\n"+
+			"github.com/acme/parent@v1.0.0 github.com/acme/transitive@v1.2.0\n",
+	), selected)
+	g.AddRoot("example.com/app")
+	s := &Scanner{
+		Dependencies: fakeDeps{&dependency.Result{Root: "/x", MainModule: "example.com/app", Modules: []model.Module{
+			{Path: "example.com/app", Main: true, Kind: model.DependencyMain},
+			{Path: "github.com/acme/parent", Version: "v1.0.0", Kind: model.DependencyDirect, ManifestAudited: true},
+			{Path: "github.com/acme/transitive", Version: "v1.2.0", Kind: model.DependencyTransitive, ManifestAudited: true},
+		}, Graph: g}},
+		Vulnerabilities: fakeVulns{},
+		Versions:        transitiveHealthLatest{},
+		Repositories:    transitiveHealthRepositories{},
+		Now:             func() time.Time { return time.Date(2026, 8, 21, 0, 0, 0, 0, time.UTC) },
+	}
+	r, err := s.Scan(context.Background(), ".", Options{NoGoVersion: true, NoGitHub: true, NoNVD: true, NoEPSS: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Summary.Transitive != 1 || r.Summary.Unmaintained != 1 {
+		t.Fatalf("summary=%+v", r.Summary)
+	}
+	if len(r.Health) != 1 {
+		t.Fatalf("health=%+v", r.Health)
+	}
+	h := r.Health[0]
+	if h.Module.Path != "github.com/acme/transitive" || h.Kind != model.DependencyTransitive || !h.Unmaintained {
+		t.Fatalf("transitive health=%+v", h)
+	}
+	if len(h.Paths) != 1 || len(h.Paths[0]) != 3 {
+		t.Fatalf("paths=%+v", h.Paths)
+	}
+	if h.Paths[0][1].Path != "github.com/acme/parent" || h.Paths[0][2].Path != "github.com/acme/transitive" {
+		t.Fatalf("unexpected path=%+v", h.Paths[0])
+	}
+}
+
+func TestToolchainUpgradeRecommendation(t *testing.T) {
+	s := &Scanner{GoReleases: fakeGoRelease{}}
+	report := &model.Report{}
+	deps := &dependency.Result{GoDirective: "1.26", Toolchain: "go1.26.1"}
+	if err := s.checkGoVersion(context.Background(), deps, report, Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if report.Go == nil || report.Go.DirectiveOutdated || !report.Go.ToolchainOutdated || report.Go.RecommendedToolchain != "go1.26.6" {
+		t.Fatalf("go health=%+v", report.Go)
 	}
 }
