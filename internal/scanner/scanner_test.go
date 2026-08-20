@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -144,5 +145,39 @@ func TestScanEnrichesGitHubAndNVD(t *testing.T) {
 	}
 	if r.Findings[0].Fix == nil || r.Findings[0].Fix.To != "v1.2.3" {
 		t.Fatalf("unexpected fix %#v", r.Findings[0].Fix)
+	}
+}
+
+type failingGitHub struct{}
+
+func (failingGitHub) Query(context.Context, []string) (map[string]githubadvisory.Record, error) {
+	return nil, errors.New("github is having a day")
+}
+
+type failingNVD struct{}
+
+func (failingNVD) Query(context.Context, []string) (map[string]nvd.Record, error) {
+	return nil, errors.New("nvd is also having a day")
+}
+
+func TestScanKeepsOSVFindingWhenEnrichmentFails(t *testing.T) {
+	g := dependency.ParseGraph([]byte("example.com/app example.com/deep@v1.2.0\n"), map[string]string{"example.com/app": "", "example.com/deep": "v1.2.0"})
+	g.AddRoot("example.com/app")
+	s := &Scanner{
+		Dependencies: fakeDeps{&dependency.Result{Root: "/x", MainModule: "example.com/app", Modules: []model.Module{
+			{Path: "example.com/app", Main: true, Kind: model.DependencyMain},
+			{Path: "example.com/deep", Version: "v1.2.0", Kind: model.DependencyDirect},
+		}, Graph: g}},
+		Vulnerabilities: fakeVulns{}, GitHub: failingGitHub{}, NVD: failingNVD{}, Versions: fakeLatest{},
+	}
+	r, err := s.Scan(context.Background(), ".", Options{NoEPSS: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Findings) != 1 {
+		t.Fatalf("OSV finding disappeared: %#v", r)
+	}
+	if len(r.Warnings) != 2 {
+		t.Fatalf("expected enrichment warnings, got %v", r.Warnings)
 	}
 }
