@@ -12,6 +12,7 @@ import (
 	"github.com/therxwold/GoSCAn/internal/fixer"
 	"github.com/therxwold/GoSCAn/internal/githubadvisory"
 	"github.com/therxwold/GoSCAn/internal/model"
+	"github.com/therxwold/GoSCAn/internal/nvd"
 	"github.com/therxwold/GoSCAn/internal/osv"
 	"github.com/therxwold/GoSCAn/internal/versionresolver"
 )
@@ -25,6 +26,9 @@ type vulnSource interface {
 type githubSource interface {
 	Query(context.Context, []string) (map[string]githubadvisory.Record, error)
 }
+type nvdSource interface {
+	Query(context.Context, []string) (map[string]nvd.Record, error)
+}
 type epssSource interface {
 	Query(context.Context, []string) (map[string]model.EPSS, error)
 }
@@ -37,6 +41,7 @@ type Scanner struct {
 	Dependencies    dependencyLoader
 	Vulnerabilities vulnSource
 	GitHub          githubSource
+	NVD             nvdSource
 	EPSS            epssSource
 	Versions        latestResolver
 	Now             func() time.Time
@@ -46,15 +51,17 @@ type Scanner struct {
 // Options controls optional scan behavior.
 type Options struct {
 	NoGitHub bool
+	NoNVD    bool
 	NoEPSS   bool
 }
 
-// New returns a Scanner wired to the default Go, OSV, GitHub, EPSS, and version providers.
+// New returns a Scanner wired to the default Go, OSV, GitHub, NVD, EPSS, and version providers.
 func New() *Scanner {
 	return &Scanner{
 		Dependencies:    dependency.Loader{},
 		Vulnerabilities: osv.Client{},
 		GitHub:          githubadvisory.Client{},
+		NVD:             nvd.Client{},
 		EPSS:            epss.Client{},
 		Versions:        versionresolver.Resolver{},
 		Now:             time.Now,
@@ -126,6 +133,7 @@ func (s *Scanner) Scan(ctx context.Context, dir string, opts Options) (*model.Re
 	}
 
 	s.enrichGitHub(ctx, report, opts)
+	s.enrichNVD(ctx, report, opts)
 	s.enrichEPSS(ctx, report, opts)
 
 	for i := range report.Findings {
@@ -204,6 +212,37 @@ func (s *Scanner) enrichGitHub(ctx context.Context, report *model.Report, opts O
 		v.References = appendUniqueAll(v.References, r.References)
 		sort.Strings(v.Aliases)
 		sort.Strings(v.CVEs)
+	}
+}
+
+func (s *Scanner) enrichNVD(ctx context.Context, report *model.Report, opts Options) {
+	if opts.NoNVD || s.NVD == nil || len(report.Findings) == 0 {
+		return
+	}
+	var cves []string
+	for _, f := range report.Findings {
+		cves = append(cves, f.Vulnerability.CVEs...)
+	}
+	records, err := s.NVD.Query(ctx, cves)
+	if err != nil {
+		report.Warnings = append(report.Warnings, "NVD enrichment failed: "+err.Error())
+	}
+	for i := range report.Findings {
+		v := &report.Findings[i].Vulnerability
+		for _, cve := range v.CVEs {
+			r, ok := records[cve]
+			if !ok {
+				continue
+			}
+			v.Sources = appendSource(v.Sources, model.SourceNVD)
+			if v.Details == "" {
+				v.Details = r.Description
+			}
+			mergeRisk(v, r.CVSS, r.Severity)
+			v.CWEs = appendUniqueAll(v.CWEs, r.CWEs)
+			v.References = appendUniqueAll(v.References, r.References)
+			v.KnownExploited = v.KnownExploited || r.KnownExploited
+		}
 	}
 }
 

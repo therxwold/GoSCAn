@@ -17,10 +17,14 @@ func sampleReport() *model.Report {
 			{
 				Module: model.Module{Path: "golang.org/x/net", Version: "v0.20.0", Kind: model.DependencyTransitive},
 				Vulnerability: model.Vulnerability{
-					ID:       "GO-1",
-					Severity: model.SeverityHigh,
-					Fixed:    "v0.25.0",
-					EPSS:     &model.EPSS{Score: .5, Percentile: .9},
+					ID:             "GO-1",
+					Severity:       model.SeverityHigh,
+					Fixed:          "v0.25.0",
+					CVSS:           &model.CVSS{Version: "3.1", Score: 8.1, Source: "nvd"},
+					EPSS:           &model.EPSS{Score: .5, Percentile: .9},
+					CWEs:           []string{"CWE-400"},
+					Sources:        []model.AdvisorySource{model.SourceOSV, model.SourceGitHub, model.SourceNVD},
+					KnownExploited: true,
 				},
 				Fix: &model.FixRecommendation{
 					Command:     "go get golang.org/x/net@v0.25.0",
@@ -37,7 +41,7 @@ func TestTerminalContainsGoModRecommendation(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := b.String()
-	for _, want := range []string{"TRANSITIVE", "go.mod recommendation", "// indirect", "EPSS"} {
+	for _, want := range []string{"TRANSITIVE", "go.mod recommendation", "// indirect", "EPSS", "CWE-400", "github", "CISA KEV"} {
 		if !strings.Contains(strings.ToUpper(s), strings.ToUpper(want)) {
 			t.Fatalf("missing %q in %s", want, s)
 		}

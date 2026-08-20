@@ -86,7 +86,11 @@ func writeTerminal(w io.Writer, r *model.Report) error {
 			fmt.Fprintf(w, "  Latest:   %s\n", f.LatestVersion)
 		}
 		if v.CVSS != nil {
-			fmt.Fprintf(w, "  CVSS:     %.1f (%s)\n", v.CVSS.Score, v.CVSS.Version)
+			source := ""
+			if v.CVSS.Source != "" {
+				source = ", " + v.CVSS.Source
+			}
+			fmt.Fprintf(w, "  CVSS:     %.1f (%s%s)\n", v.CVSS.Score, v.CVSS.Version, source)
 		} else {
 			fmt.Fprintln(w, "  CVSS:     unavailable")
 		}
@@ -95,6 +99,19 @@ func writeTerminal(w io.Writer, r *model.Report) error {
 		}
 		if len(v.CVEs) > 0 {
 			fmt.Fprintf(w, "  CVE:      %s\n", strings.Join(v.CVEs, ", "))
+		}
+		if len(v.CWEs) > 0 {
+			fmt.Fprintf(w, "  CWE:      %s\n", strings.Join(v.CWEs, ", "))
+		}
+		if len(v.Sources) > 0 {
+			sources := make([]string, 0, len(v.Sources))
+			for _, source := range v.Sources {
+				sources = append(sources, string(source))
+			}
+			fmt.Fprintf(w, "  Sources:  %s\n", strings.Join(sources, ", "))
+		}
+		if v.KnownExploited {
+			fmt.Fprintln(w, "  CISA KEV: yes")
 		}
 		if len(f.Paths) > 0 {
 			fmt.Fprintln(w, "  Path:")
@@ -188,6 +205,15 @@ func writeSARIF(w io.Writer, r *model.Report) error {
 		}
 		if v.EPSS != nil {
 			props["epss"] = v.EPSS.Score
+		}
+		if len(v.CWEs) > 0 {
+			props["cwes"] = v.CWEs
+		}
+		if len(v.Sources) > 0 {
+			props["sources"] = v.Sources
+		}
+		if v.KnownExploited {
+			props["knownExploited"] = true
 		}
 		msg := fmt.Sprintf("%s affects %s@%s", v.ID, f.Module.Path, f.Module.Version)
 		if v.Fixed != "" {

@@ -8,6 +8,7 @@ import (
 	"github.com/therxwold/GoSCAn/internal/dependency"
 	"github.com/therxwold/GoSCAn/internal/githubadvisory"
 	"github.com/therxwold/GoSCAn/internal/model"
+	"github.com/therxwold/GoSCAn/internal/nvd"
 	"github.com/therxwold/GoSCAn/internal/osv"
 )
 
@@ -102,7 +103,22 @@ func (fakeGitHub) Query(context.Context, []string) (map[string]githubadvisory.Re
 	}, nil
 }
 
-func TestScanEnrichesGitHub(t *testing.T) {
+type fakeNVD struct{}
+
+func (fakeNVD) Query(context.Context, []string) (map[string]nvd.Record, error) {
+	return map[string]nvd.Record{
+		"CVE-2026-1": {
+			ID:             "CVE-2026-1",
+			Severity:       model.SeverityCritical,
+			CVSS:           &model.CVSS{Version: "3.1", Score: 9.8, Source: "nvd"},
+			CWEs:           []string{"CWE-787"},
+			References:     []string{"https://nvd.test/cve"},
+			KnownExploited: true,
+		},
+	}, nil
+}
+
+func TestScanEnrichesGitHubAndNVD(t *testing.T) {
 	g := dependency.ParseGraph([]byte("example.com/app example.com/deep@v1.2.0\n"), map[string]string{"example.com/app": "", "example.com/deep": "v1.2.0"})
 	g.AddRoot("example.com/app")
 	s := &Scanner{
@@ -110,7 +126,7 @@ func TestScanEnrichesGitHub(t *testing.T) {
 			{Path: "example.com/app", Main: true, Kind: model.DependencyMain},
 			{Path: "example.com/deep", Version: "v1.2.0", Kind: model.DependencyDirect},
 		}, Graph: g}},
-		Vulnerabilities: fakeVulns{}, GitHub: fakeGitHub{}, EPSS: fakeEPSS{}, Versions: fakeLatest{},
+		Vulnerabilities: fakeVulns{}, GitHub: fakeGitHub{}, NVD: fakeNVD{}, EPSS: fakeEPSS{}, Versions: fakeLatest{},
 	}
 	r, err := s.Scan(context.Background(), ".", Options{})
 	if err != nil {
@@ -120,10 +136,10 @@ func TestScanEnrichesGitHub(t *testing.T) {
 		t.Fatalf("findings=%d", len(r.Findings))
 	}
 	v := r.Findings[0].Vulnerability
-	if v.CVSS == nil || v.CVSS.Score != 8.4 || v.CVSS.Source != "github" || v.Severity != model.SeverityHigh {
+	if v.CVSS == nil || v.CVSS.Score != 9.8 || v.CVSS.Source != "nvd" || v.Severity != model.SeverityCritical {
 		t.Fatalf("unexpected risk %#v", v)
 	}
-	if v.KnownExploited || len(v.CWEs) != 1 || len(v.Sources) != 1 {
+	if !v.KnownExploited || len(v.CWEs) != 2 || len(v.Sources) != 2 {
 		t.Fatalf("unexpected enrichment %#v", v)
 	}
 	if r.Findings[0].Fix == nil || r.Findings[0].Fix.To != "v1.2.3" {
