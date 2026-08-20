@@ -68,8 +68,8 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 	noGitHub := fs.Bool("no-github", false, "disable GitHub Advisory Database enrichment")
 	noNVD := fs.Bool("no-nvd", false, "disable NVD enrichment")
 	noEPSS := fs.Bool("no-epss", !cfg.EPSS.Enabled, "disable FIRST EPSS enrichment")
-	githubToken := fs.String("github-token", cfg.GitHub.Token, "GitHub token; environment variables are safer")
-	nvdAPIKey := fs.String("nvd-api-key", cfg.NVD.APIKey, "NVD API key; environment variables are safer")
+	githubToken := fs.String("github-token", "", "GitHub token override; environment variables are safer")
+	nvdAPIKey := fs.String("nvd-api-key", "", "NVD API key override; environment variables are safer")
 	timeout := fs.Duration("timeout", cfg.Scan.Timeout, "overall scan timeout")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -111,10 +111,19 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
+	githubAuth := cfg.GitHub.Token
+	if *githubToken != "" {
+		githubAuth = *githubToken
+	}
+	nvdAuth := cfg.NVD.APIKey
+	if *nvdAPIKey != "" {
+		nvdAuth = *nvdAPIKey
+	}
+
 	s := scanner.New()
 	s.ToolVersion = strings.TrimPrefix(Version, "v")
-	s.GitHub = githubadvisory.Client{Token: *githubToken}
-	s.NVD = nvd.Client{APIKey: *nvdAPIKey}
+	s.GitHub = githubadvisory.Client{Token: githubAuth}
+	s.NVD = nvd.Client{APIKey: nvdAuth}
 	report, err := s.Scan(ctx, dir, scanner.Options{NoGitHub: !*githubEnabled, NoNVD: !*nvdEnabled, NoEPSS: *noEPSS})
 	if err != nil {
 		fmt.Fprintln(stderr, "goscan:", err)
@@ -152,8 +161,8 @@ func runFix(args []string, stdout, stderr io.Writer) int {
 	noGitHub := fs.Bool("no-github", false, "disable GitHub Advisory Database enrichment")
 	noNVD := fs.Bool("no-nvd", false, "disable NVD enrichment")
 	noEPSS := fs.Bool("no-epss", !cfg.EPSS.Enabled, "disable FIRST EPSS enrichment")
-	githubToken := fs.String("github-token", cfg.GitHub.Token, "GitHub token; environment variables are safer")
-	nvdAPIKey := fs.String("nvd-api-key", cfg.NVD.APIKey, "NVD API key; environment variables are safer")
+	githubToken := fs.String("github-token", "", "GitHub token override; environment variables are safer")
+	nvdAPIKey := fs.String("nvd-api-key", "", "NVD API key override; environment variables are safer")
 	formatName := fs.String("format", cfg.Output.Format, "output format: terminal, json, sarif")
 	timeout := fs.Duration("timeout", cfg.Fix.Timeout, "overall fix/verification timeout")
 	if err := fs.Parse(args); err != nil {
@@ -184,10 +193,19 @@ func runFix(args []string, stdout, stderr io.Writer) int {
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
+	githubAuth := cfg.GitHub.Token
+	if *githubToken != "" {
+		githubAuth = *githubToken
+	}
+	nvdAuth := cfg.NVD.APIKey
+	if *nvdAPIKey != "" {
+		nvdAuth = *nvdAPIKey
+	}
+
 	s := scanner.New()
 	s.ToolVersion = strings.TrimPrefix(Version, "v")
-	s.GitHub = githubadvisory.Client{Token: *githubToken}
-	s.NVD = nvd.Client{APIKey: *nvdAPIKey}
+	s.GitHub = githubadvisory.Client{Token: githubAuth}
+	s.NVD = nvd.Client{APIKey: nvdAuth}
 	opts := scanner.Options{NoGitHub: !*githubEnabled, NoNVD: !*nvdEnabled, NoEPSS: *noEPSS}
 	report, err := s.Scan(ctx, dir, opts)
 	if err != nil {
