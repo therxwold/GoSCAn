@@ -65,7 +65,7 @@ goscan version
 A release build prints something similar to:
 
 ```text
-goscan v0.2.0
+goscan v0.3.0
 ```
 
 ## Scan
@@ -374,13 +374,13 @@ OSV and the Go Vulnerability Database remain the primary package/version matchin
 
 GitHub and NVD are enrichment sources rather than replacements for Go ecosystem matching. If either enrichment service is unavailable or rate-limited, GoSCAn keeps the OSV finding and emits a warning instead of discarding the scan result.
 
-## Current v0.2 boundaries
+## Current v0.3 boundaries
 
 - Source-level vulnerable-symbol reachability is not used to suppress dependency findings. GoSCAn intentionally reports vulnerable selected modules even when the vulnerable symbol may not be reachable, because its primary job is dependency hygiene and remediation.
-- Automatic parent-module upgrade search is not attempted yet. For a transitive vulnerability, v0.2 prefers the explicit minimal MVS pin because it is deterministic and directly addresses the selected vulnerable version.
+- Automatic parent-module upgrade search is not attempted yet. For a transitive vulnerability, v0.3 prefers the explicit minimal MVS pin because it is deterministic and directly addresses the selected vulnerable version.
 - Versioned `replace` targets are scanned but not automatically rewritten.
 
-Those boundaries are deliberate: v0.2 focuses on getting the selected dependency graph, vulnerability matching, risk enrichment, and minimal remediation correct before adding more speculative upgrade planning.
+Those boundaries are deliberate: v0.3 focuses on getting the selected dependency graph, vulnerability matching, risk enrichment, and minimal remediation correct before adding more speculative upgrade planning.
 
 ## Credits
 
