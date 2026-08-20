@@ -66,7 +66,7 @@ goscan v0.1.0
 
 ## Scan
 
-Run in a Go module:
+Run GoSCAn inside a Go module:
 
 ```bash
 goscan
