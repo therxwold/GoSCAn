@@ -1,0 +1,55 @@
+name: GoSCAn
+description: Scan all selected Go modules for vulnerabilities and fail CI on policy thresholds.
+author: Naru K
+inputs:
+  fail-on:
+    description: Minimum vulnerability severity that fails the job (none, low, medium, high, critical).
+    required: false
+    default: high
+  epss-threshold:
+    description: EPSS probability threshold from 0 to 1; -1 disables EPSS-based failure.
+    required: false
+    default: "-1"
+  format:
+    description: Output format (terminal, json, sarif).
+    required: false
+    default: terminal
+  no-epss:
+    description: Disable EPSS enrichment.
+    required: false
+    default: "false"
+runs:
+  using: composite
+  steps:
+    - name: Set up Go
+      uses: actions/setup-go@v6
+      with:
+        go-version-file: go.mod
+        cache: false
+
+    - name: Build GoSCAn
+      shell: bash
+      run: |
+        set -euo pipefail
+        cd "$GITHUB_ACTION_PATH"
+        go build -trimpath -ldflags "-s -w" \
+          -o "$RUNNER_TEMP/goscan" ./cmd/goscan
+
+    - name: Scan dependencies
+      shell: bash
+      env:
+        GOSCAN_FAIL_ON: ${{ inputs.fail-on }}
+        GOSCAN_EPSS_THRESHOLD: ${{ inputs.epss-threshold }}
+        GOSCAN_FORMAT: ${{ inputs.format }}
+        GOSCAN_NO_EPSS: ${{ inputs.no-epss }}
+      run: |
+        set -euo pipefail
+        args=(scan --fail-on "$GOSCAN_FAIL_ON" --epss-threshold "$GOSCAN_EPSS_THRESHOLD" --format "$GOSCAN_FORMAT")
+        if [[ "$GOSCAN_NO_EPSS" == "true" ]]; then
+          args+=(--no-epss)
+        fi
+        cd "$GITHUB_WORKSPACE"
+        "$RUNNER_TEMP/goscan" "${args[@]}"
+branding:
+  icon: shield
+  color: red
