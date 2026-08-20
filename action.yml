@@ -2,6 +2,10 @@ name: GoSCAn
 description: Scan all selected Go modules for vulnerabilities and fail CI on policy thresholds.
 author: Naru K
 inputs:
+  path:
+    description: Go module directory to scan, relative to the repository root.
+    required: false
+    default: "."
   fail-on:
     description: Minimum vulnerability severity that fails the job (none, low, medium, high, critical).
     required: false
@@ -10,16 +14,20 @@ inputs:
     description: EPSS probability threshold from 0 to 1; -1 disables EPSS-based failure.
     required: false
     default: "-1"
+  strict-enrichment:
+    description: Fail when an enabled GitHub, NVD, or EPSS enrichment source is unavailable.
+    required: false
+    default: "false"
   format:
     description: Output format (terminal, json, sarif).
     required: false
     default: terminal
-  config:
-    description: Optional GoSCAn config.yml path relative to the repository root.
+  output-file:
+    description: Optional report path relative to the repository root. Empty writes to the workflow log.
     required: false
     default: ""
-  nvd-api-key:
-    description: Optional NVD API key. Prefer passing this from a GitHub Actions secret.
+  config:
+    description: Optional GoSCAn config.yml path relative to the repository root.
     required: false
     default: ""
   no-github:
@@ -50,7 +58,7 @@ runs:
   using: composite
   steps:
     - name: Set up Go
-      uses: actions/setup-go@v6
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version: "1.26.6"
         cache: false
@@ -66,12 +74,14 @@ runs:
     - name: Scan dependencies
       shell: bash
       env:
-        GOSCAN_GITHUB_TOKEN: ${{ github.token }}
-        GOSCAN_NVD_API_KEY: ${{ inputs.nvd-api-key }}
+        GOSCAN_DEFAULT_GITHUB_TOKEN: ${{ github.token }}
         GOSCAN_FAIL_ON: ${{ inputs.fail-on }}
         GOSCAN_EPSS_THRESHOLD: ${{ inputs.epss-threshold }}
+        GOSCAN_STRICT_ENRICHMENT: ${{ inputs.strict-enrichment }}
         GOSCAN_FORMAT: ${{ inputs.format }}
+        GOSCAN_OUTPUT_FILE: ${{ inputs.output-file }}
         GOSCAN_CONFIG: ${{ inputs.config }}
+        GOSCAN_PATH: ${{ inputs.path }}
         GOSCAN_NO_GITHUB: ${{ inputs.no-github }}
         GOSCAN_NO_NVD: ${{ inputs.no-nvd }}
         GOSCAN_NO_EPSS: ${{ inputs.no-epss }}
@@ -80,9 +90,21 @@ runs:
         GOSCAN_SHOW_MANIFESTS: ${{ inputs.show-manifests }}
       run: |
         set -euo pipefail
+
+        # Preserve a caller-provided token; otherwise use the workflow token.
+        if [[ -z "${GOSCAN_GITHUB_TOKEN:-}" ]]; then
+          export GOSCAN_GITHUB_TOKEN="$GOSCAN_DEFAULT_GITHUB_TOKEN"
+        fi
+
         args=(scan --fail-on "$GOSCAN_FAIL_ON" --epss-threshold "$GOSCAN_EPSS_THRESHOLD" --format "$GOSCAN_FORMAT")
+        if [[ "$GOSCAN_STRICT_ENRICHMENT" == "true" ]]; then
+          args+=(--strict-enrichment)
+        fi
         if [[ -n "$GOSCAN_CONFIG" ]]; then
           args+=(--config "$GOSCAN_CONFIG")
+        else
+          # Do not treat an application's unrelated config.yml as GoSCAn config.
+          args+=(--no-config)
         fi
         if [[ "$GOSCAN_NO_GITHUB" == "true" ]]; then
           args+=(--no-github)
@@ -104,8 +126,15 @@ runs:
             [[ -n "$rule" ]] && args+=(--ignore "$rule")
           done <<< "$GOSCAN_IGNORE"
         fi
+
         cd "$GITHUB_WORKSPACE"
-        "$RUNNER_TEMP/goscan" "${args[@]}"
+        args+=(-- "$GOSCAN_PATH")
+        if [[ -n "$GOSCAN_OUTPUT_FILE" ]]; then
+          mkdir -p "$(dirname "$GOSCAN_OUTPUT_FILE")"
+          "$RUNNER_TEMP/goscan" "${args[@]}" > "$GOSCAN_OUTPUT_FILE"
+        else
+          "$RUNNER_TEMP/goscan" "${args[@]}"
+        fi
 branding:
   icon: shield
   color: red

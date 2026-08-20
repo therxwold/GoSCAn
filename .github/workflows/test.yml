@@ -7,37 +7,80 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
-    strategy:
-      matrix:
-        go: ["1.26.6", "stable"]
+  quality:
+    name: Go 1.26.6 quality gate
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          go-version: ${{ matrix.go }}
-          cache: false
-      - run: go test -race -coverprofile=coverage.out ./...
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.6"
+          cache: true
+          cache-dependency-path: go.sum
+      - name: Verify module files are tidy
+        run: go mod tidy -diff
+      - run: go mod verify
+      - run: go test -race -count=1 -coverprofile=coverage.out ./...
       - run: go vet ./...
       - run: make build
       - run: ./bin/goscan -v
       - run: ./bin/goscan --version
       - run: ./bin/goscan version
-      - run: ./bin/goscan scan --no-github --no-nvd --no-epss .
+      - run: ./bin/goscan scan --help
+      - run: ./bin/goscan fix --help
+      - name: Self-scan selected dependencies
+        run: ./bin/goscan scan --no-github --no-nvd --no-epss --fail-on=high .
+      - name: Check GoSCAn with govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
+      - name: Verify tracked files stayed clean
+        run: git diff --exit-code
+
+  platform:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.6"
+          cache: true
+          cache-dependency-path: go.sum
+      - run: go test -count=1 ./...
+      - run: go build ./cmd/goscan
 
   action-smoke:
     name: GitHub Action smoke test
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Run GoSCAn through action.yml
         uses: ./
         with:
+          path: .
           fail-on: none
           no-github: "true"
           no-nvd: "true"
           no-epss: "true"
           show-manifests: "true"
-          format: terminal
+          format: json
+          output-file: .goscan/report.json
+      - name: Verify action report
+        run: test -s .goscan/report.json
