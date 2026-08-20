@@ -10,6 +10,7 @@ import (
 	"github.com/therxwold/GoSCAn/internal/dependency"
 	"github.com/therxwold/GoSCAn/internal/epss"
 	"github.com/therxwold/GoSCAn/internal/fixer"
+	"github.com/therxwold/GoSCAn/internal/githubadvisory"
 	"github.com/therxwold/GoSCAn/internal/model"
 	"github.com/therxwold/GoSCAn/internal/osv"
 	"github.com/therxwold/GoSCAn/internal/versionresolver"
@@ -20,6 +21,9 @@ type dependencyLoader interface {
 }
 type vulnSource interface {
 	Query(context.Context, []osv.Target) (map[string][]model.Vulnerability, error)
+}
+type githubSource interface {
+	Query(context.Context, []string) (map[string]githubadvisory.Record, error)
 }
 type epssSource interface {
 	Query(context.Context, []string) (map[string]model.EPSS, error)
@@ -32,6 +36,7 @@ type latestResolver interface {
 type Scanner struct {
 	Dependencies    dependencyLoader
 	Vulnerabilities vulnSource
+	GitHub          githubSource
 	EPSS            epssSource
 	Versions        latestResolver
 	Now             func() time.Time
@@ -39,13 +44,17 @@ type Scanner struct {
 }
 
 // Options controls optional scan behavior.
-type Options struct{ NoEPSS bool }
+type Options struct {
+	NoGitHub bool
+	NoEPSS   bool
+}
 
-// New returns a Scanner wired to the default Go, OSV, EPSS, and version providers.
+// New returns a Scanner wired to the default Go, OSV, GitHub, EPSS, and version providers.
 func New() *Scanner {
 	return &Scanner{
 		Dependencies:    dependency.Loader{},
 		Vulnerabilities: osv.Client{},
+		GitHub:          githubadvisory.Client{},
 		EPSS:            epss.Client{},
 		Versions:        versionresolver.Resolver{},
 		Now:             time.Now,
@@ -110,39 +119,21 @@ func (s *Scanner) Scan(ctx context.Context, dir string, opts Options) (*model.Re
 			latestCache[target.Path] = latest
 		}
 		for _, v := range vulns {
-			fix := fixer.Recommend(m, v.Fixed, latest)
-			if m.Replace != nil && v.Fixed != "" {
-				report.Warnings = append(report.Warnings, fmt.Sprintf("%s is replaced; automatic go.mod remediation was not proposed", m.Path))
-			}
-			report.Findings = append(report.Findings, model.Finding{Module: m, Vulnerability: v, LatestVersion: latest, Paths: deps.Graph.PathsTo(m.Path, 3), Fix: fix})
+			report.Findings = append(report.Findings, model.Finding{
+				Module: m, Vulnerability: v, LatestVersion: latest, Paths: deps.Graph.PathsTo(m.Path, 3),
+			})
 		}
 	}
 
-	if !opts.NoEPSS && s.EPSS != nil && len(report.Findings) > 0 {
-		var cves []string
-		for _, f := range report.Findings {
-			cves = append(cves, f.Vulnerability.CVEs...)
-		}
-		if len(cves) > 0 {
-			scores, err := s.EPSS.Query(ctx, cves)
-			if err != nil {
-				report.Warnings = append(report.Warnings, "EPSS enrichment failed: "+err.Error())
-			} else {
-				for i := range report.Findings {
-					var best *model.EPSS
-					for _, cve := range report.Findings[i].Vulnerability.CVEs {
-						if e, ok := scores[cve]; ok && (best == nil || e.Score > best.Score) {
-							copy := e
-							best = &copy
-						}
-					}
-					report.Findings[i].Vulnerability.EPSS = best
-				}
-			}
-		}
-	}
+	s.enrichGitHub(ctx, report, opts)
+	s.enrichEPSS(ctx, report, opts)
 
-	for _, f := range report.Findings {
+	for i := range report.Findings {
+		f := &report.Findings[i]
+		f.Fix = fixer.Recommend(f.Module, f.Vulnerability.Fixed, f.LatestVersion)
+		if f.Module.Replace != nil && f.Vulnerability.Fixed != "" {
+			report.Warnings = append(report.Warnings, fmt.Sprintf("%s is replaced; automatic go.mod remediation was not proposed", f.Module.Path))
+		}
 		switch f.Vulnerability.Severity {
 		case model.SeverityCritical:
 			report.Summary.Critical++
@@ -156,6 +147,7 @@ func (s *Scanner) Scan(ctx context.Context, dir string, opts Options) (*model.Re
 			report.Summary.Unknown++
 		}
 	}
+
 	sort.SliceStable(report.Findings, func(i, j int) bool {
 		a, b := report.Findings[i], report.Findings[j]
 		if a.Vulnerability.Severity.Rank() != b.Vulnerability.Severity.Rank() {
@@ -168,6 +160,156 @@ func (s *Scanner) Scan(ctx context.Context, dir string, opts Options) (*model.Re
 	})
 	report.Warnings = uniqueSorted(report.Warnings)
 	return report, nil
+}
+
+func (s *Scanner) enrichGitHub(ctx context.Context, report *model.Report, opts Options) {
+	if opts.NoGitHub || s.GitHub == nil || len(report.Findings) == 0 {
+		return
+	}
+	var ids []string
+	lookup := make([]string, len(report.Findings))
+	for i := range report.Findings {
+		lookup[i] = githubLookupID(report.Findings[i].Vulnerability)
+		if lookup[i] != "" {
+			ids = append(ids, lookup[i])
+		}
+	}
+	records, err := s.GitHub.Query(ctx, ids)
+	if err != nil {
+		report.Warnings = append(report.Warnings, "GitHub advisory enrichment failed: "+err.Error())
+	}
+	for i := range report.Findings {
+		r, ok := records[lookup[i]]
+		if !ok {
+			continue
+		}
+		v := &report.Findings[i].Vulnerability
+		v.Sources = appendSource(v.Sources, model.SourceGitHub)
+		v.Aliases = appendIdentifier(v.Aliases, v.ID, r.GHSAID)
+		v.Aliases = appendIdentifier(v.Aliases, v.ID, r.CVEID)
+		if strings.HasPrefix(r.CVEID, "CVE-") {
+			v.CVEs = appendUnique(v.CVEs, r.CVEID)
+		}
+		if v.Summary == "" {
+			v.Summary = r.Summary
+		}
+		if v.Details == "" {
+			v.Details = r.Description
+		}
+		if path, _, ok := report.Findings[i].Module.ScanTarget(); ok && v.Fixed == "" {
+			v.Fixed = r.FirstPatchedByGo[path]
+		}
+		mergeRisk(v, r.CVSS, r.Severity)
+		v.CWEs = appendUniqueAll(v.CWEs, r.CWEs)
+		v.References = appendUniqueAll(v.References, r.References)
+		sort.Strings(v.Aliases)
+		sort.Strings(v.CVEs)
+	}
+}
+
+func (s *Scanner) enrichEPSS(ctx context.Context, report *model.Report, opts Options) {
+	if opts.NoEPSS || s.EPSS == nil || len(report.Findings) == 0 {
+		return
+	}
+	var cves []string
+	for _, f := range report.Findings {
+		cves = append(cves, f.Vulnerability.CVEs...)
+	}
+	if len(cves) == 0 {
+		return
+	}
+	scores, err := s.EPSS.Query(ctx, cves)
+	if err != nil {
+		report.Warnings = append(report.Warnings, "EPSS enrichment failed: "+err.Error())
+		return
+	}
+	for i := range report.Findings {
+		var best *model.EPSS
+		for _, cve := range report.Findings[i].Vulnerability.CVEs {
+			if e, ok := scores[cve]; ok && (best == nil || e.Score > best.Score) {
+				copy := e
+				best = &copy
+			}
+		}
+		report.Findings[i].Vulnerability.EPSS = best
+	}
+}
+
+func githubLookupID(v model.Vulnerability) string {
+	for _, id := range append([]string{v.ID}, v.Aliases...) {
+		if strings.HasPrefix(id, "GHSA-") {
+			return id
+		}
+	}
+	for _, id := range v.CVEs {
+		if strings.HasPrefix(id, "CVE-") {
+			return id
+		}
+	}
+	return ""
+}
+
+func mergeRisk(v *model.Vulnerability, candidate *model.CVSS, severity model.Severity) {
+	if candidate != nil && (v.CVSS == nil || candidate.Score > v.CVSS.Score) {
+		copy := *candidate
+		v.CVSS = &copy
+		v.Severity = severityFromScore(candidate.Score)
+		return
+	}
+	if severity.Rank() > v.Severity.Rank() {
+		v.Severity = severity
+	}
+}
+
+func severityFromScore(score float64) model.Severity {
+	switch {
+	case score >= 9:
+		return model.SeverityCritical
+	case score >= 7:
+		return model.SeverityHigh
+	case score >= 4:
+		return model.SeverityMedium
+	case score > 0:
+		return model.SeverityLow
+	default:
+		return model.SeverityUnknown
+	}
+}
+
+func appendSource(in []model.AdvisorySource, source model.AdvisorySource) []model.AdvisorySource {
+	for _, existing := range in {
+		if existing == source {
+			return in
+		}
+	}
+	return append(in, source)
+}
+
+func appendIdentifier(in []string, primary, id string) []string {
+	if id == "" || id == primary {
+		return in
+	}
+	return appendUnique(in, id)
+}
+
+func appendUniqueAll(in []string, values []string) []string {
+	for _, value := range values {
+		in = appendUnique(in, value)
+	}
+	sort.Strings(in)
+	return in
+}
+
+func appendUnique(in []string, value string) []string {
+	if value == "" {
+		return in
+	}
+	for _, existing := range in {
+		if existing == value {
+			return in
+		}
+	}
+	return append(in, value)
 }
 
 func (s *Scanner) now() time.Time {

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/therxwold/GoSCAn/internal/dependency"
+	"github.com/therxwold/GoSCAn/internal/githubadvisory"
 	"github.com/therxwold/GoSCAn/internal/model"
 	"github.com/therxwold/GoSCAn/internal/osv"
 )
@@ -82,5 +83,50 @@ func TestExceeds(t *testing.T) {
 	}
 	if Exceeds(r, model.SeverityCritical, .9) {
 		t.Fatal("unexpected")
+	}
+}
+
+type fakeGitHub struct{}
+
+func (fakeGitHub) Query(context.Context, []string) (map[string]githubadvisory.Record, error) {
+	return map[string]githubadvisory.Record{
+		"CVE-2026-1": {
+			GHSAID:           "GHSA-test-1234-5678",
+			CVEID:            "CVE-2026-1",
+			Severity:         model.SeverityHigh,
+			CVSS:             &model.CVSS{Version: "3.1", Score: 8.4, Source: "github"},
+			CWEs:             []string{"CWE-400"},
+			References:       []string{"https://github.test/advisory"},
+			FirstPatchedByGo: map[string]string{"example.com/deep": "v1.2.3"},
+		},
+	}, nil
+}
+
+func TestScanEnrichesGitHub(t *testing.T) {
+	g := dependency.ParseGraph([]byte("example.com/app example.com/deep@v1.2.0\n"), map[string]string{"example.com/app": "", "example.com/deep": "v1.2.0"})
+	g.AddRoot("example.com/app")
+	s := &Scanner{
+		Dependencies: fakeDeps{&dependency.Result{Root: "/x", MainModule: "example.com/app", Modules: []model.Module{
+			{Path: "example.com/app", Main: true, Kind: model.DependencyMain},
+			{Path: "example.com/deep", Version: "v1.2.0", Kind: model.DependencyDirect},
+		}, Graph: g}},
+		Vulnerabilities: fakeVulns{}, GitHub: fakeGitHub{}, EPSS: fakeEPSS{}, Versions: fakeLatest{},
+	}
+	r, err := s.Scan(context.Background(), ".", Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Findings) != 1 {
+		t.Fatalf("findings=%d", len(r.Findings))
+	}
+	v := r.Findings[0].Vulnerability
+	if v.CVSS == nil || v.CVSS.Score != 8.4 || v.CVSS.Source != "github" || v.Severity != model.SeverityHigh {
+		t.Fatalf("unexpected risk %#v", v)
+	}
+	if v.KnownExploited || len(v.CWEs) != 1 || len(v.Sources) != 1 {
+		t.Fatalf("unexpected enrichment %#v", v)
+	}
+	if r.Findings[0].Fix == nil || r.Findings[0].Fix.To != "v1.2.3" {
+		t.Fatalf("unexpected fix %#v", r.Findings[0].Fix)
 	}
 }
