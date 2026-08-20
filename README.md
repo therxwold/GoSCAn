@@ -254,6 +254,11 @@ Vulnerability data comes from OSV using the `Go` ecosystem. EPSS enrichment come
 
 Those boundaries are deliberate: v0.1 focuses on getting the selected dependency graph, vulnerability matching, risk enrichment, and minimal remediation correct before adding more speculative upgrade planning.
 
+## Credits
+
+- **Naru K** — creator, architecture, implementation, and documentation.
+- **Eluuna** — testing, documentation, and review. She tends to find the edge case everyone was sure was fine, and is usually far too pleased about it.
+
 ## License
 
 GoSCAn is licensed under the GNU General Public License v3.0 (`GPL-3.0-only`). See [`LICENSE`](LICENSE).
