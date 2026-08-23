@@ -13,10 +13,14 @@ epss:
   enabled: true
 
 # Accepted false positives. The key can be an advisory ID/alias, or module@ID
-# to suppress only one dependency. Keep a reason so the exception is auditable.
+# to suppress only one dependency. Persistent exceptions may also name an owner
+# and expiration date; expired exceptions stop suppressing findings.
 ignore:
   show: false
-  # GO-2026-1234: "vulnerable code path is not reachable in this application"
+  # GO-2026-1234:
+  #   reason: "vulnerable code path is not reachable in this application"
+  #   owner: "security@example.com"
+  #   expires: "2026-12-31"
   # golang.org/x/net@CVE-2026-12345: "not affected on supported targets"
 
 # Dependency and Go release health is reported separately from CVEs.

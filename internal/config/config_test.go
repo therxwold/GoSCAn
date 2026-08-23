@@ -7,6 +7,7 @@ import (
 	"time"
 )
 
+// TestLoadConfig verifies that every supported YAML section is merged correctly.
 func TestLoadConfig(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yml")
@@ -53,7 +54,7 @@ output:
 	if cfg.GitHub.Enabled || cfg.GitHub.Token != "file-token" || !cfg.NVD.Enabled || cfg.NVD.APIKey != "nvd-file" {
 		t.Fatalf("unexpected source config: %#v", cfg)
 	}
-	if cfg.EPSS.Enabled || !cfg.Ignore.Show || len(cfg.Ignore.Rules) != 2 || cfg.Ignore.Rules["GO-2026-1234"] != "not reachable in our build" {
+	if cfg.EPSS.Enabled || !cfg.Ignore.Show || len(cfg.Ignore.Rules) != 2 || cfg.Ignore.Rules["GO-2026-1234"].Reason != "not reachable in our build" {
 		t.Fatalf("unexpected ignore config: %#v", cfg.Ignore)
 	}
 	if !cfg.Health.Enabled || !cfg.Health.CheckGo || cfg.Health.StaleAfterDays != 365 || !cfg.Health.FailOnOutdatedGo || !cfg.Health.FailOnUnmaintained {
@@ -67,6 +68,7 @@ output:
 	}
 }
 
+// TestEnvironmentOverridesSecrets verifies environment credential precedence.
 func TestEnvironmentOverridesSecrets(t *testing.T) {
 	t.Setenv("GOSCAN_GITHUB_TOKEN", "env-github")
 	t.Setenv("GOSCAN_NVD_API_KEY", "env-nvd")
@@ -79,6 +81,7 @@ func TestEnvironmentOverridesSecrets(t *testing.T) {
 	}
 }
 
+// TestConfigExpandsEnvironmentVariables verifies value-level environment expansion.
 func TestConfigExpandsEnvironmentVariables(t *testing.T) {
 	t.Setenv("TEST_GOSCAN_TOKEN", "secret")
 	dir := t.TempDir()
@@ -95,6 +98,7 @@ func TestConfigExpandsEnvironmentVariables(t *testing.T) {
 	}
 }
 
+// TestPathFromArgs verifies early configuration-path extraction.
 func TestPathFromArgs(t *testing.T) {
 	path, explicit, err := PathFromArgs([]string{"--format=json", "--config", "custom.yml"})
 	if err != nil {
@@ -105,6 +109,7 @@ func TestPathFromArgs(t *testing.T) {
 	}
 }
 
+// TestIgnoreRuleRequiresReason verifies that empty exception reasons are rejected.
 func TestIgnoreRuleRequiresReason(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yml")
@@ -116,6 +121,7 @@ func TestIgnoreRuleRequiresReason(t *testing.T) {
 	}
 }
 
+// TestConfigRejectsUnknownSettings verifies strict YAML field validation.
 func TestConfigRejectsUnknownSettings(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yml")
@@ -127,6 +133,7 @@ func TestConfigRejectsUnknownSettings(t *testing.T) {
 	}
 }
 
+// TestConfigRejectsMultipleDocuments verifies that only one YAML document is accepted.
 func TestConfigRejectsMultipleDocuments(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yml")
@@ -138,6 +145,7 @@ func TestConfigRejectsMultipleDocuments(t *testing.T) {
 	}
 }
 
+// TestConfigExpansionCannotInjectYAML verifies that expanded values cannot alter YAML structure.
 func TestConfigExpansionCannotInjectYAML(t *testing.T) {
 	t.Setenv("TEST_GOSCAN_TOKEN", "secret\nscan:\n  fail_on: critical")
 	t.Setenv("TEST_GOSCAN_REASON", "accepted\noutput:\n  format: json")
@@ -161,11 +169,46 @@ ignore:
 	if cfg.Scan.FailOn != "none" || cfg.Output.Format != "terminal" {
 		t.Fatalf("environment data changed YAML structure: %#v", cfg)
 	}
-	if got := cfg.Ignore.Rules["CVE-2026-1234"]; got != "accepted\noutput:\n  format: json" {
+	if got := cfg.Ignore.Rules["CVE-2026-1234"].Reason; got != "accepted\noutput:\n  format: json" {
 		t.Fatalf("reason expansion changed: %q", got)
 	}
 }
 
+// TestStructuredIgnoreRule verifies reason, owner, and expiration decoding.
+func TestStructuredIgnoreRule(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yml")
+	data := []byte(`ignore:
+  GO-2026-1234:
+    reason: accepted risk
+    owner: security@example.com
+    expires: "2026-09-30"
+`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rule := cfg.Ignore.Rules["GO-2026-1234"]
+	if rule.Reason != "accepted risk" || rule.Owner != "security@example.com" || rule.Expires != "2026-09-30" {
+		t.Fatalf("unexpected rule: %#v", rule)
+	}
+}
+
+// TestStructuredIgnoreRuleRejectsInvalidExpiry verifies expiration-date validation.
+func TestStructuredIgnoreRuleRejectsInvalidExpiry(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yml")
+	data := []byte("ignore:\n  GO-2026-1234:\n    reason: accepted risk\n    expires: tomorrow\n")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path, true); err == nil {
+		t.Fatal("expected invalid expiration date to fail")
+	}
+}
+
+// TestConfigRejectsNonPositiveTimeouts verifies scan and fix timeout validation.
 func TestConfigRejectsNonPositiveTimeouts(t *testing.T) {
 	for name, data := range map[string]string{
 		"scan": "scan:\n  timeout: 0s\n",
@@ -183,6 +226,7 @@ func TestConfigRejectsNonPositiveTimeouts(t *testing.T) {
 	}
 }
 
+// TestIgnoreReasonCannotExpandToEmpty verifies validation after environment expansion.
 func TestIgnoreReasonCannotExpandToEmpty(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yml")
 	if err := os.WriteFile(path, []byte(`ignore:
@@ -195,6 +239,7 @@ func TestIgnoreReasonCannotExpandToEmpty(t *testing.T) {
 	}
 }
 
+// TestConfigRejectsInvalidStaleWindow verifies stale-window validation.
 func TestConfigRejectsInvalidStaleWindow(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yml")
 	if err := os.WriteFile(path, []byte("health:\n  stale_after_days: 0\n"), 0o600); err != nil {

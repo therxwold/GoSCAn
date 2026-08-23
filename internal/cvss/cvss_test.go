@@ -2,6 +2,7 @@ package cvss
 
 import "testing"
 
+// TestScoreV3 verifies CVSS 3.1 parsing and scoring.
 func TestScoreV3(t *testing.T) {
 	tests := []struct {
 		vector string
@@ -22,6 +23,7 @@ func TestScoreV3(t *testing.T) {
 	}
 }
 
+// TestScoreCVSS2 verifies CVSS 2.0 parsing and scoring.
 func TestScoreCVSS2(t *testing.T) {
 	got, version, err := Score("AV:N/AC:L/Au:N/C:P/I:P/A:P")
 	if err != nil {
@@ -32,6 +34,7 @@ func TestScoreCVSS2(t *testing.T) {
 	}
 }
 
+// TestScoreCVSS30 verifies CVSS 3.0 parsing and scoring.
 func TestScoreCVSS30(t *testing.T) {
 	got, version, err := Score("CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H")
 	if err != nil {
@@ -42,6 +45,7 @@ func TestScoreCVSS30(t *testing.T) {
 	}
 }
 
+// TestScoreCVSS4 verifies CVSS 4.0 parsing and scoring.
 func TestScoreCVSS4(t *testing.T) {
 	vector := "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N"
 	got, version, err := Score(vector)

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/therxwold/GoSCAn/internal/model"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -43,7 +44,7 @@ type EPSSConfig struct {
 // IgnoreConfig contains accepted false-positive rules and display preferences.
 type IgnoreConfig struct {
 	Show  bool
-	Rules map[string]string
+	Rules map[string]model.IgnoreRule
 }
 
 // HealthConfig controls Go runtime and dependency maintenance checks.
@@ -78,6 +79,7 @@ type OutputConfig struct {
 	Format string
 }
 
+// fileConfig mirrors the YAML schema while preserving whether optional fields were set.
 type fileConfig struct {
 	GitHub *struct {
 		Enabled *bool   `yaml:"enabled"`
@@ -123,7 +125,7 @@ func Default() Config {
 		GitHub: GitHubConfig{Enabled: true},
 		NVD:    NVDConfig{Enabled: true},
 		EPSS:   EPSSConfig{Enabled: true},
-		Ignore: IgnoreConfig{Rules: map[string]string{}},
+		Ignore: IgnoreConfig{Rules: map[string]model.IgnoreRule{}},
 		Health: HealthConfig{Enabled: true, CheckGo: true, StaleAfterDays: 730},
 		Scan: ScanConfig{
 			FailOn:        "none",
@@ -169,10 +171,10 @@ func Load(path string, explicit bool) (Config, error) {
 
 // PathFromArgs returns the config path selected by --config before the main flag set is parsed.
 func PathFromArgs(args []string) (path string, explicit bool, err error) {
-	for i := 0; i < len(args); i++ {
+	for i := range args {
 		arg := args[i]
-		if strings.HasPrefix(arg, "--config=") {
-			path = strings.TrimSpace(strings.TrimPrefix(arg, "--config="))
+		if after, ok := strings.CutPrefix(arg, "--config="); ok {
+			path = strings.TrimSpace(after)
 			if path == "" {
 				return "", true, fmt.Errorf("--config requires a path")
 			}
@@ -188,6 +190,7 @@ func PathFromArgs(args []string) (path string, explicit bool, err error) {
 	return "config.yml", false, nil
 }
 
+// decodeYAML strictly decodes one YAML document and merges it into cfg.
 func decodeYAML(data []byte, cfg *Config) error {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
@@ -212,6 +215,7 @@ func decodeYAML(data []byte, cfg *Config) error {
 	return mergeFileConfig(cfg, raw)
 }
 
+// mergeFileConfig validates and applies explicitly configured file values.
 func mergeFileConfig(cfg *Config, raw fileConfig) error {
 	if raw.GitHub != nil {
 		if raw.GitHub.Enabled != nil {
@@ -234,9 +238,11 @@ func mergeFileConfig(cfg *Config, raw fileConfig) error {
 	}
 	if raw.Ignore != nil {
 		if cfg.Ignore.Rules == nil {
-			cfg.Ignore.Rules = map[string]string{}
+			cfg.Ignore.Rules = map[string]model.IgnoreRule{}
 		}
 		for key, value := range raw.Ignore {
+			// show belongs to the ignore section but is presentation state rather
+			// than an advisory exception.
 			if key == "show" {
 				show, ok := value.(bool)
 				if !ok {
@@ -245,15 +251,14 @@ func mergeFileConfig(cfg *Config, raw fileConfig) error {
 				cfg.Ignore.Show = show
 				continue
 			}
-			reason, ok := value.(string)
-			if !ok {
+			rule, err := decodeIgnoreRule(value)
+			if err != nil {
+				return fmt.Errorf("ignore rule %s: %w", key, err)
+			}
+			if rule.Reason == "" {
 				return fmt.Errorf("ignore rule %s requires a reason", key)
 			}
-			reason = strings.TrimSpace(os.ExpandEnv(reason))
-			if reason == "" {
-				return fmt.Errorf("ignore rule %s requires a reason", key)
-			}
-			cfg.Ignore.Rules[strings.TrimSpace(key)] = reason
+			cfg.Ignore.Rules[strings.TrimSpace(key)] = rule
 		}
 	}
 	if raw.Health != nil {
@@ -330,6 +335,44 @@ func mergeFileConfig(cfg *Config, raw fileConfig) error {
 	return nil
 }
 
+// decodeIgnoreRule accepts legacy string rules and structured auditable rules.
+func decodeIgnoreRule(value any) (model.IgnoreRule, error) {
+	// String rules preserve the original configuration format. Structured rules
+	// add ownership and lifecycle metadata without breaking existing files.
+	if reason, ok := value.(string); ok {
+		return model.IgnoreRule{Reason: strings.TrimSpace(os.ExpandEnv(reason))}, nil
+	}
+	fields, ok := value.(map[string]any)
+	if !ok {
+		return model.IgnoreRule{}, fmt.Errorf("requires a reason")
+	}
+	rule := model.IgnoreRule{}
+	for key, raw := range fields {
+		text, ok := raw.(string)
+		if !ok {
+			return model.IgnoreRule{}, fmt.Errorf("%s must be a string", key)
+		}
+		text = strings.TrimSpace(os.ExpandEnv(text))
+		switch key {
+		case "reason":
+			rule.Reason = text
+		case "owner":
+			rule.Owner = text
+		case "expires":
+			if text != "" {
+				if _, err := time.Parse("2006-01-02", text); err != nil {
+					return model.IgnoreRule{}, fmt.Errorf("expires must use YYYY-MM-DD")
+				}
+			}
+			rule.Expires = text
+		default:
+			return model.IgnoreRule{}, fmt.Errorf("unknown field %s", key)
+		}
+	}
+	return rule, nil
+}
+
+// applyEnvironment overlays supported credential environment variables onto cfg.
 func applyEnvironment(cfg *Config) {
 	if v := firstEnv("GOSCAN_GITHUB_TOKEN", "GITHUB_TOKEN"); v != "" {
 		cfg.GitHub.Token = v
@@ -339,6 +382,7 @@ func applyEnvironment(cfg *Config) {
 	}
 }
 
+// firstEnv returns the first non-empty environment value in priority order.
 func firstEnv(names ...string) string {
 	for _, name := range names {
 		if v := os.Getenv(name); v != "" {

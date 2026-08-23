@@ -8,12 +8,14 @@ import (
 	"github.com/therxwold/GoSCAn/internal/model"
 )
 
+// sampleReport returns a report populated with every major output field.
 func sampleReport() *model.Report {
 	return &model.Report{
-		ToolVersion: "0.1.0",
-		Module:      "example.com/app",
-		Summary:     model.Summary{Modules: 2, Direct: 1, Transitive: 1, High: 1, Unmaintained: 1, Stale: 1, OutdatedDependencies: 1},
-		Go:          &model.GoHealth{Directive: "1.18", Latest: "go1.26.6", RecommendedDirective: "1.26", DirectiveOutdated: true, Unsupported: true},
+		ToolVersion:      "0.1.0",
+		Module:           "example.com/app",
+		MainRequirements: []model.ModuleRequirement{{Path: "example.com/parent", Version: "v1.0.0"}},
+		Summary:          model.Summary{Modules: 2, Direct: 1, Transitive: 1, High: 1, Unmaintained: 1, Stale: 1, OutdatedDependencies: 1},
+		Go:               &model.GoHealth{Directive: "1.18", Latest: "go1.26.6", RecommendedDirective: "1.26", DirectiveOutdated: true, Unsupported: true},
 		Health: []model.DependencyHealth{{
 			Module: model.ModuleRef{Path: "github.com/go-martini/martini", Version: "v0.0.0-20170121215854-22fa46961aab"},
 			Kind:   model.DependencyTransitive,
@@ -54,6 +56,38 @@ func sampleReport() *model.Report {
 	}
 }
 
+// TestTerminalAttributesDirectRequirementToMainModule verifies declaration provenance.
+func TestTerminalAttributesDirectRequirementToMainModule(t *testing.T) {
+	r := sampleReport()
+	r.MainRequirements = append(r.MainRequirements, model.ModuleRequirement{Path: "golang.org/x/net", Version: "v0.19.0", SelectedVersion: "v0.20.0"})
+	r.Findings[0].Module.Kind = model.DependencyDirect
+	var b bytes.Buffer
+	if err := Write(&b, r, FormatTerminal); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(b.String(), "example.com/app requires golang.org/x/net@v0.19.0 (selected v0.20.0)") {
+		t.Fatal(b.String())
+	}
+}
+
+// TestTerminalLabelsGraphOnlyModules verifies graph-only scope presentation.
+func TestTerminalLabelsGraphOnlyModules(t *testing.T) {
+	r := sampleReport()
+	r.PackageAnalysis = true
+	r.Health[0].PackagesLoaded = false
+	r.Findings[0].Module.PackagesLoaded = false
+	var b bytes.Buffer
+	if err := Write(&b, r, FormatTerminal); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Scope:    graph-only", "transitive, graph-only"} {
+		if !strings.Contains(b.String(), want) {
+			t.Fatalf("missing %q in %s", want, b.String())
+		}
+	}
+}
+
+// TestTerminalContainsGoModRecommendation verifies detailed terminal remediation output.
 func TestTerminalContainsGoModRecommendation(t *testing.T) {
 	var b bytes.Buffer
 	if err := Write(&b, sampleReport(), FormatTerminal); err != nil {
@@ -65,8 +99,12 @@ func TestTerminalContainsGoModRecommendation(t *testing.T) {
 			t.Fatalf("missing %q in %s", want, s)
 		}
 	}
+	if !strings.Contains(s, "directive predates supported release lines") || strings.Contains(s, "(unsupported;") {
+		t.Fatalf("misleading Go directive status in %s", s)
+	}
 }
 
+// TestJSON verifies complete report JSON encoding.
 func TestJSON(t *testing.T) {
 	var b bytes.Buffer
 	if err := Write(&b, sampleReport(), FormatJSON); err != nil {
@@ -77,6 +115,7 @@ func TestJSON(t *testing.T) {
 	}
 }
 
+// TestTerminalCanShowDependencyManifests verifies optional manifest rendering.
 func TestTerminalCanShowDependencyManifests(t *testing.T) {
 	var b bytes.Buffer
 	if err := Write(&b, sampleReport(), FormatTerminal, WriteOptions{ShowManifests: true}); err != nil {
@@ -89,6 +128,7 @@ func TestTerminalCanShowDependencyManifests(t *testing.T) {
 	}
 }
 
+// TestJSONIncludesDependencyManifests verifies manifest metadata in JSON output.
 func TestJSONIncludesDependencyManifests(t *testing.T) {
 	var b bytes.Buffer
 	if err := Write(&b, sampleReport(), FormatJSON); err != nil {
@@ -101,6 +141,7 @@ func TestJSONIncludesDependencyManifests(t *testing.T) {
 	}
 }
 
+// TestSARIF verifies basic SARIF 2.1.0 encoding.
 func TestSARIF(t *testing.T) {
 	var b bytes.Buffer
 	if err := Write(&b, sampleReport(), FormatSARIF); err != nil {
@@ -111,6 +152,7 @@ func TestSARIF(t *testing.T) {
 	}
 }
 
+// TestIgnoredFindingsAreHiddenUnlessRequested verifies terminal suppression visibility.
 func TestIgnoredFindingsAreHiddenUnlessRequested(t *testing.T) {
 	r := sampleReport()
 	ignored := r.Findings[0]
@@ -140,6 +182,7 @@ func TestIgnoredFindingsAreHiddenUnlessRequested(t *testing.T) {
 	}
 }
 
+// TestJSONKeepsIgnoredFindingsForAudit verifies suppression audit metadata in JSON.
 func TestJSONKeepsIgnoredFindingsForAudit(t *testing.T) {
 	r := sampleReport()
 	ignored := r.Findings[0]
@@ -159,6 +202,7 @@ func TestJSONKeepsIgnoredFindingsForAudit(t *testing.T) {
 	}
 }
 
+// TestSARIFCanMarkIgnoredFindingAsSuppressed verifies accepted SARIF suppressions.
 func TestSARIFCanMarkIgnoredFindingAsSuppressed(t *testing.T) {
 	r := sampleReport()
 	ignored := r.Findings[0]
@@ -178,12 +222,20 @@ func TestSARIFCanMarkIgnoredFindingAsSuppressed(t *testing.T) {
 	}
 }
 
+// TestSARIFIncludesRuntimeAndDependencyHealth verifies extended SARIF result properties.
 func TestSARIFIncludesRuntimeAndDependencyHealth(t *testing.T) {
+	r := sampleReport()
+	r.Findings[0].Module.Scope = model.ScopeTestOnly
+	r.Findings[0].Reachability = model.ReachabilityCalled
+	r.Findings[0].BaselineStatus = "new"
+	r.Findings[0].Vulnerability.AffectedImports = []model.AffectedImport{{Path: "golang.org/x/net/http2", Symbols: []string{"Parse"}}}
+	r.Health[0].Retracted = []string{"published accidentally"}
+	r.Integrity = &model.Integrity{Error: "checksum mismatch"}
 	var b bytes.Buffer
-	if err := Write(&b, sampleReport(), FormatSARIF); err != nil {
+	if err := Write(&b, r, FormatSARIF); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{`"ruleId": "GOSCAN-GO-UNSUPPORTED"`, `"ruleId": "GOSCAN-DEPENDENCY-UNMAINTAINED"`, `"ruleId": "GOSCAN-DEPENDENCY-OUTDATED"`} {
+	for _, want := range []string{`"ruleId": "GOSCAN-GO-UNSUPPORTED"`, `"ruleId": "GOSCAN-DEPENDENCY-UNMAINTAINED"`, `"ruleId": "GOSCAN-DEPENDENCY-OUTDATED"`, `"ruleId": "GOSCAN-DEPENDENCY-RETRACTED"`, `"ruleId": "GOSCAN-MODULE-INTEGRITY"`, `"scope": "test-only"`, `"reachability": "called"`, `"baselineStatus": "new"`, `"affectedImports"`} {
 		if !strings.Contains(b.String(), want) {
 			t.Fatalf("missing %s in %s", want, b.String())
 		}

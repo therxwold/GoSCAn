@@ -36,6 +36,7 @@ type Record struct {
 	FirstPatchedByGo map[string]string
 }
 
+// apiAdvisory models the GitHub REST representation used during normalization.
 type apiAdvisory struct {
 	GHSAID         string   `json:"ghsa_id"`
 	CVEID          string   `json:"cve_id"`
@@ -84,6 +85,7 @@ func (c Client) Query(ctx context.Context, ids []string) (map[string]Record, err
 
 	var mu sync.Mutex
 	var firstErr error
+	// Bound concurrency to avoid turning a large alias set into a GitHub API burst.
 	sem := make(chan struct{}, 6)
 	var wg sync.WaitGroup
 	for _, id := range ids {
@@ -111,6 +113,7 @@ func (c Client) Query(ctx context.Context, ids []string) (map[string]Record, err
 	return out, firstErr
 }
 
+// queryOne retrieves and normalizes one GHSA or CVE identifier.
 func (c Client) queryOne(ctx context.Context, hc *http.Client, base, id string) (Record, bool, error) {
 	var advisories []apiAdvisory
 	switch {
@@ -143,6 +146,7 @@ func (c Client) queryOne(ctx context.Context, hc *http.Client, base, id string) 
 	return Record{}, false, nil
 }
 
+// getJSON performs one authenticated GitHub API request and decodes its JSON body.
 func (c Client) getJSON(ctx context.Context, hc *http.Client, endpoint string, dst any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
@@ -166,6 +170,7 @@ func (c Client) getJSON(ctx context.Context, hc *http.Client, endpoint string, d
 	return json.NewDecoder(resp.Body).Decode(dst)
 }
 
+// normalize converts GitHub's API shape into the scanner's enrichment record.
 func normalize(a apiAdvisory) Record {
 	r := Record{
 		GHSAID:           a.GHSAID,
@@ -194,15 +199,18 @@ func normalize(a apiAdvisory) Record {
 	if a.CVSSSeverities.V4.Score > 0 {
 		r.CVSS = &model.CVSS{Version: "4.0", Vector: a.CVSSSeverities.V4.Vector, Score: a.CVSSSeverities.V4.Score, Source: string(model.SourceGitHub)}
 	}
+	// Retain the highest available score rather than assuming the newest CVSS
+	// version is necessarily the most severe representation.
 	if a.CVSSSeverities.V3.Score > 0 && (r.CVSS == nil || a.CVSSSeverities.V3.Score > r.CVSS.Score) {
 		r.CVSS = &model.CVSS{Version: cvssVersion(a.CVSSSeverities.V3.Vector, "3.x"), Vector: a.CVSSSeverities.V3.Vector, Score: a.CVSSSeverities.V3.Score, Source: string(model.SourceGitHub)}
 	}
 	return r
 }
 
+// cvssVersion extracts the version component from a CVSS vector.
 func cvssVersion(vector, fallback string) string {
-	if strings.HasPrefix(vector, "CVSS:") {
-		if rest := strings.TrimPrefix(vector, "CVSS:"); rest != "" {
+	if after, ok := strings.CutPrefix(vector, "CVSS:"); ok {
+		if rest := after; rest != "" {
 			if version, _, ok := strings.Cut(rest, "/"); ok {
 				return version
 			}
@@ -211,6 +219,7 @@ func cvssVersion(vector, fallback string) string {
 	return fallback
 }
 
+// parseSeverity maps GitHub severity labels to normalized model values.
 func parseSeverity(v string) model.Severity {
 	switch strings.ToLower(v) {
 	case "critical":
@@ -226,6 +235,7 @@ func parseSeverity(v string) model.Severity {
 	}
 }
 
+// unique removes empty and duplicate strings and returns a sorted result.
 func unique(in []string) []string {
 	seen := map[string]bool{}
 	out := make([]string, 0, len(in))

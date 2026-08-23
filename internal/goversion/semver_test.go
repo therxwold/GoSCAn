@@ -2,6 +2,7 @@ package goversion
 
 import "testing"
 
+// TestCompare verifies Go module semantic-version ordering.
 func TestCompare(t *testing.T) {
 	tests := []struct {
 		a, b string
@@ -24,6 +25,7 @@ func TestCompare(t *testing.T) {
 	}
 }
 
+// TestNormalizeForGo verifies canonical v-prefixed module versions.
 func TestNormalizeForGo(t *testing.T) {
 	if got := NormalizeForGo("1.2.3"); got != "v1.2.3" {
 		t.Fatalf("got %q", got)

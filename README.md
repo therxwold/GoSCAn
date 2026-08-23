@@ -6,12 +6,15 @@ Its job is not only to say that a dependency is vulnerable. It also explains why
 
 ## What it does
 
-- Scans **every versioned module selected by `go list -m -json all`**.
+- Scans **every versioned module selected by `go list -m -json all`** and queries retraction metadata for those exact selected versions.
 - Classifies modules as `direct`, `indirect`, or `transitive` for reporting.
+- Classifies loaded code as `runtime`, `test-only`, or `graph-only`, including the specific affected package when advisory import metadata is available.
 - Builds dependency paths from `go mod graph`.
 - Audits every selected dependency's actual `go.mod` with `golang.org/x/mod/modfile`, including the dependency's Go version, requested module version, `// indirect` state, and the version actually selected by MVS.
 - Keeps manifest requirements separate from the active `go mod graph`, so pruned or stale declarations cannot invent active dependency paths.
 - Queries OSV using the Go ecosystem and the exact selected module version.
+- Resolves packages loaded by `./...` and its tests, then uses Go advisory import-path metadata to suppress module-level matches for packages the build does not load. If package analysis is incomplete, scanning falls back conservatively to module-level results.
+- Retains vulnerable package and symbol metadata from the Go Vulnerability Database, and runs the official `govulncheck` analyzer to identify called vulnerable symbols and report source-to-sink call paths.
 - Cross-checks OSV findings against reviewed GitHub Advisory Database records.
 - Enriches CVEs with NVD metadata, CVSS, CWE references, and CISA KEV status when available.
 - Groups duplicate OSV/GO/GHSA/CVE aliases into one finding.
@@ -23,7 +26,10 @@ Its job is not only to say that a dependency is vulnerable. It also explains why
 - Recommends an explicit `// indirect` `go.mod` requirement for vulnerable transitive dependencies when there is a fixed version.
 - Supports terminal, JSON, and SARIF output.
 - Supports CI policy exits by severity and/or EPSS threshold.
-- Supports auditable false-positive ignore rules by GO/GHSA/CVE alias, with optional module scoping.
+- Supports auditable false-positive ignore rules by GO/GHSA/CVE alias, with optional module scoping, owner, and expiration date.
+- Compares scans against saved baselines and classifies findings as new, unchanged, regressed, or resolved.
+- Reports retracted selected versions and verifies the module cache with `go mod verify` during every scan.
+- Previews latest-version upgrades without modifying files and reports dependency and vulnerability changes after an applied upgrade.
 - Can apply fixes with `go get`, run `go mod tidy`, verify downloaded modules, run tests, and roll back `go.mod`/`go.sum` if verification fails.
 
 Local filesystem replacements are intentionally skipped because a registry version no longer identifies the code being built. Versioned `replace` targets are scanned, but GoSCAn does not automatically rewrite replacement directives because guessing the intended replacement scope is unsafe.
@@ -36,6 +42,7 @@ GoSCAn intentionally keeps its third-party dependency set small, but it does not
 
 - `go.yaml.in/yaml/v3` parses `config.yml`.
 - `golang.org/x/mod` handles `go.mod` parsing and Go semantic-version comparison.
+- `golang.org/x/vuln` embeds the official `govulncheck` source analyzer.
 - `github.com/pandatix/go-cvss` parses and scores CVSS 2.0, 3.0, 3.1, and 4.0 vectors.
 
 ## Build
@@ -89,6 +96,12 @@ Example finding:
 ```text
 HIGH  GO-2026-XXXX
   Module:   golang.org/x/net@v0.20.0 (transitive)
+  Scope:    runtime
+  Evidence: called
+  Affected: golang.org/x/net/http2 (processSettingsFrame)
+  Call path:
+    example.com/app.main
+    └── golang.org/x/net/http2.processSettingsFrame
   Fixed:    v0.25.0
   Latest:   v0.44.0
   CVSS:     9.1 (3.1, nvd)
@@ -107,7 +120,7 @@ HIGH  GO-2026-XXXX
     + require golang.org/x/net v0.25.0 // indirect
 ```
 
-The explicit transitive pin works with Go MVS by raising the minimum selected version in the main module. GoSCAn recommends the **first fixed version**, not `@latest`, as the minimal security repair. The latest version is shown separately so the developer can choose a larger upgrade deliberately.
+The explicit transitive pin works with Go MVS by raising the minimum selected version in the main module. GoSCAn recommends the **first fixed version**, not `@latest`, as the minimal security repair. The latest version is shown separately so the developer can choose a larger upgrade deliberately. Reachability is evidence, not an automatic suppression: a selected vulnerable module remains visible even when no call path is found.
 
 ### Dependency manifest audit
 
@@ -138,12 +151,14 @@ GoSCAn discovers the current release from Go's official downloads JSON endpoint 
 
 ```text
 Go version:
-  go:        1.18 -> 1.27 (unsupported; latest stable go1.27.0)
+  go:        1.18 -> 1.27 (directive predates supported release lines; latest stable go1.27.0)
 ```
+
+The `go` directive sets the module's minimum language and module semantics; it does not identify the toolchain currently building the project. This status therefore describes the directive's release line, not proof that an unsupported toolchain is in use.
 
 If the main module already has a `toolchain` directive, GoSCAn checks that exact toolchain too and recommends the newest stable toolchain when it is behind. It does not add a `toolchain` directive to projects that do not already use one.
 
-Maintenance findings are not CVEs. A dependency can therefore have no known vulnerability and still be reported as `UNMAINTAINED`, `ARCHIVED`, `STALE`, `DEPRECATED`, or `OUTDATED`. This is intentional. For example, `github.com/go-martini/martini` is flagged when upstream explicitly states that the framework is no longer maintained, and any selected dependencies below Martini are checked independently as well. GoSCAn never promotes a version merely mentioned in a dependency's `go.mod` into an active health or vulnerability finding: the selected MVS build list remains the source of truth.
+Maintenance findings are not CVEs. A dependency can therefore have no known vulnerability and still be reported as `UNMAINTAINED`, `ARCHIVED`, `STALE`, `DEPRECATED`, `RETRACTED`, or `OUTDATED`. This is intentional. Retraction reasons come from the selected version's module metadata. GoSCAn also runs `go mod verify`; terminal and JSON output record successful verification, a missing `go.sum`, or a checksum/cache failure, while SARIF emits results for the failure states. GoSCAn never promotes a version merely mentioned in a dependency's `go.mod` into an active health or vulnerability finding: the selected MVS build list remains the source of truth.
 
 Useful policy flags:
 
@@ -210,7 +225,10 @@ epss:
 
 ignore:
   show: false
-  # GO-2026-1234: "vulnerable code path is not reachable in this application"
+  # GO-2026-1234:
+  #   reason: "vulnerable code path is not reachable in this application"
+  #   owner: "security@example.com"
+  #   expires: "2026-12-31"
   # golang.org/x/net@CVE-2026-12345: "not affected on supported targets"
 
 scan:
@@ -282,7 +300,10 @@ A rule can match the primary Go advisory ID or any known GHSA/CVE alias:
 ignore:
   show: false
   GO-2026-1234: "vulnerable code path is not reachable in this application"
-  CVE-2026-56789: "upstream confirmed this platform is not affected"
+  CVE-2026-56789:
+    reason: "upstream confirmed this platform is not affected"
+    owner: "security@example.com"
+    expires: "2026-12-31"
 ```
 
 To limit an exception to one dependency, prefix the advisory with the module path:
@@ -292,7 +313,7 @@ ignore:
   golang.org/x/net@CVE-2026-56789: "only the unsupported target is affected"
 ```
 
-Ignored findings are excluded from severity/EPSS CI failure decisions and from automatic fix application. JSON keeps them under `ignored_findings` with the matching rule and reason so the suppression remains auditable.
+Legacy string rules remain supported. Structured rules add an owner and an ISO `YYYY-MM-DD` expiration date. An expired rule no longer suppresses its finding; GoSCAn reports the finding as active and emits an expiration warning. Ignored findings are excluded from severity/EPSS CI failure decisions and from automatic fix application. JSON keeps them under `ignored_findings` with the matching rule, reason, owner, and expiration so the suppression remains auditable.
 
 For a temporary CLI exception, `--ignore` is repeatable:
 
@@ -313,6 +334,17 @@ goscan scan --show-ignored --format=sarif
 
 When included in SARIF, ignored findings use an accepted external suppression and retain the justification. JSON always retains ignored findings regardless of `--show-ignored`.
 
+## Baseline comparison
+
+Save the current finding set, then compare a later scan with it:
+
+```bash
+goscan scan --save-baseline .goscan-baseline.json
+goscan scan --baseline .goscan-baseline.json
+```
+
+The comparison uses module path plus advisory ID as the stable identity. Existing findings are `unchanged`, severity increases are `regressed`, absent prior findings are `resolved`, and previously unseen findings are `new`. The classifications are included in terminal and JSON output; SARIF finding properties include the active classification.
+
 ## Fix planning and application
 
 Show remediation recommendations without modifying the project:
@@ -327,10 +359,26 @@ Apply all automatically applicable first-fixed-version recommendations:
 goscan fix --apply
 ```
 
+Preview upgrades for every loaded dependency with a resolved newer version, plus the `go` directive and an existing `toolchain` directive:
+
+```bash
+goscan fix --latest
+```
+
+Apply that plan, using newest versions for vulnerability remediation:
+
+```bash
+goscan fix --apply --latest
+```
+
+Latest mode intentionally skips graph-only modules and replacement directives.
+Go recomputes graph-only tooling versions through their loaded parents, while
+replacement changes and library migrations require an explicit decision. After a successful apply and rescan, GoSCAn prints a before/after report containing selected-version changes and counts of resolved and newly introduced vulnerabilities.
+
 The apply path is intentionally conservative:
 
 1. Back up `go.mod` and `go.sum`.
-2. Run `go get module@first-fixed` for each affected module.
+2. Run `go get module@first-fixed` for vulnerability fixes, or `module@latest-resolved` in latest mode.
 3. Run `go mod tidy`.
 4. Run `go mod verify`.
 5. Run `go test ./...` by default.
@@ -509,7 +557,7 @@ Optional network sources can be reduced with `--no-github`, `--no-nvd`, `--no-ep
 
 ## Data sources and Go semantics
 
-GoSCAn intentionally delegates module selection to the Go command instead of reimplementing Minimal Version Selection. `go list -m -json all` is treated as the authoritative selected build list and provides each selected module's `go.mod` location and Go-version metadata. GoSCAn then reads each selected manifest with `golang.org/x/mod/modfile`, the Go project's dedicated `go.mod` parser. This is intentionally separate from `go mod graph`, because Go 1.17+ module graph pruning can omit requirements that still exist in a dependency's manifest.
+GoSCAn intentionally delegates module selection to the Go command instead of reimplementing Minimal Version Selection. `go list -m -json all` is treated as the authoritative selected build list and provides each selected module's `go.mod` location and Go-version metadata. A separate read-only `go list -m -json -retracted module@version...` query adds retraction reasons without allowing a scan to rewrite the target project's `go.sum`; unavailable retraction metadata becomes a warning. GoSCAn then reads each selected manifest with `golang.org/x/mod/modfile`, the Go project's dedicated `go.mod` parser. This is intentionally separate from `go mod graph`, because Go 1.17+ module graph pruning can omit requirements that still exist in a dependency's manifest.
 
 `go mod graph` remains the source for active ancestry. GoSCAn only accepts graph edges from the selected version of each parent module, so an older parent version that lost MVS cannot invent an active dependency path. Manifest requirements are audit/provenance data, not a second vulnerability truth source. If a dependency declares `example.com/lib v1.0.0` but MVS selects `v1.4.0`, GoSCAn scans `v1.4.0` for active vulnerabilities while retaining the `v1.0.0 -> selected v1.4.0` declaration for explanation and future fix planning.
 
@@ -519,7 +567,7 @@ GitHub and NVD are enrichment sources rather than replacements for Go ecosystem 
 
 ## Current boundaries
 
-- Source-level vulnerable-symbol reachability is not used to suppress dependency findings. GoSCAn intentionally reports vulnerable selected modules even when the vulnerable symbol may not be reachable, because its primary job is dependency hygiene and remediation.
+- `govulncheck` reachability is reported as evidence and is not used to suppress dependency findings automatically.
 - Automatic parent-module upgrade search is not attempted yet. For a transitive vulnerability, GoSCAn prefers the explicit minimal MVS pin because it is deterministic and directly addresses the selected vulnerable version.
 - Versioned `replace` targets are scanned but not automatically rewritten.
 

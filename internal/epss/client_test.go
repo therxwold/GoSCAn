@@ -8,6 +8,7 @@ import (
 	"testing"
 )
 
+// TestQuery verifies EPSS response parsing and score normalization.
 func TestQuery(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.Contains(r.URL.Query().Get("cve"), "CVE-2026-1234") {
@@ -25,6 +26,7 @@ func TestQuery(t *testing.T) {
 	}
 }
 
+// TestChunkCVEsDeduplicates verifies query-size batching and identifier deduplication.
 func TestChunkCVEsDeduplicates(t *testing.T) {
 	got := chunkCVEs([]string{"CVE-1", "CVE-1", "CVE-2"}, 10)
 	if len(got) != 2 || len(got[0]) != 1 || len(got[1]) != 1 {

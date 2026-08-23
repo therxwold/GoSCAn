@@ -23,6 +23,7 @@ type Release struct {
 	LanguageVersion string `json:"language_version"`
 }
 
+// apiRelease models one entry from the official Go downloads API.
 type apiRelease struct {
 	Version string `json:"version"`
 	Stable  bool   `json:"stable"`
@@ -58,6 +59,8 @@ func (c Client) Latest(ctx context.Context) (Release, error) {
 	}
 	var newest string
 	for _, release := range releases {
+		// The downloads feed may contain prereleases and multiple patch releases;
+		// compare canonical toolchain versions instead of trusting response order.
 		if !release.Stable || !strings.HasPrefix(release.Version, "go1.") {
 			continue
 		}
@@ -129,6 +132,7 @@ func Supported(current, latest string) bool {
 	return curMinor >= latestMinor-1
 }
 
+// majorMinor parses the release family from a Go language or toolchain version.
 func majorMinor(v string) (int, int, bool) {
 	v = strings.TrimPrefix(strings.TrimSpace(v), "go")
 	var major, minor int

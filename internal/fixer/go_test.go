@@ -10,6 +10,7 @@ import (
 	"github.com/therxwold/GoSCAn/internal/model"
 )
 
+// TestApplyGoUpgradesDirectiveAndExistingToolchain verifies both supported Go updates.
 func TestApplyGoUpgradesDirectiveAndExistingToolchain(t *testing.T) {
 	root := t.TempDir()
 	original := "module example.com/app\n\ngo 1.18\n\ntoolchain go1.25.1\n"
@@ -42,6 +43,7 @@ func TestApplyGoUpgradesDirectiveAndExistingToolchain(t *testing.T) {
 	}
 }
 
+// TestApplyGoDoesNotAddMissingToolchain verifies that toolchain remains opt-in.
 func TestApplyGoDoesNotAddMissingToolchain(t *testing.T) {
 	root := t.TempDir()
 	original := "module example.com/app\n\ngo 1.18\n"
@@ -63,6 +65,7 @@ func TestApplyGoDoesNotAddMissingToolchain(t *testing.T) {
 	}
 }
 
+// TestApplyGoRollsBackOnVerificationFailure verifies Go-setting transaction rollback.
 func TestApplyGoRollsBackOnVerificationFailure(t *testing.T) {
 	root := t.TempDir()
 	original := "module example.com/app\n\ngo 1.18\n"

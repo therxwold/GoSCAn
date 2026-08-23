@@ -1,3 +1,21 @@
-/bin/
-*.sarif
-*.out
+# Disallow everything
+*
+
+# Allow-only list
+!go.mod
+!go.sum
+!config.yml
+!action.yml
+!LICENSE
+!README.md
+!Makefile
+!.gitignore
+
+# Folders
+!cmd/
+!cmd/**/
+!internal/
+!internal/**/
+!internal/**/*.go
+!.github/
+!.github/**

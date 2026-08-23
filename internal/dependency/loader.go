@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -24,15 +26,27 @@ type Loader struct {
 
 // Result contains the complete dependency information discovered for a Go module.
 type Result struct {
-	Root        string
-	MainModule  string
-	GoDirective string
-	Toolchain   string
-	Modules     []model.Module
-	Graph       *Graph
-	Warnings    []string
+	Root       string
+	MainModule string
+	// MainRequirements are the requirements declared by the main module. They
+	// are kept separately because Modules also contains dependency manifests.
+	MainRequirements []model.ModuleRequirement
+	GoDirective      string
+	Toolchain        string
+	Modules          []model.Module
+	Graph            *Graph
+	// Packages maps module paths to package import paths loaded by `go list` for
+	// the main module and its tests. PackageAnalysis is false when that analysis
+	// could not be completed, in which case callers must remain conservative.
+	Packages        map[string][]string
+	RuntimePackages map[string][]string
+	TestPackages    map[string][]string
+	PackageAnalysis bool
+	Integrity       model.Integrity
+	Warnings        []string
 }
 
+// goListModule models the subset of `go list -m -json` output used by the loader.
 type goListModule struct {
 	Path       string        `json:"Path"`
 	Version    string        `json:"Version"`
@@ -41,6 +55,7 @@ type goListModule struct {
 	GoMod      string        `json:"GoMod"`
 	GoVersion  string        `json:"GoVersion"`
 	Deprecated string        `json:"Deprecated"`
+	Retracted  []string      `json:"Retracted"`
 	Replace    *goListModule `json:"Replace"`
 }
 
@@ -76,6 +91,9 @@ func (l Loader) Load(ctx context.Context, dir string) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Retractions are queried separately by exact version. Adding -retracted to
+	// the build-list command can make Go demand go.sum changes during a scan.
+	retractionWarning := l.loadRetractions(ctx, root, listed)
 
 	requires := make(map[string]bool, len(mainRequirements))
 	for _, r := range mainRequirements {
@@ -112,6 +130,7 @@ func (l Loader) Load(ctx context.Context, dir string) (*Result, error) {
 			IndirectRequirement: indirectReq,
 			GoVersion:           m.GoVersion,
 			Deprecated:          m.Deprecated,
+			Retracted:           append([]string(nil), m.Retracted...),
 		}
 		if m.Replace != nil {
 			mod.Replace = &model.ModuleRef{Path: m.Replace.Path, Version: m.Replace.Version}
@@ -128,6 +147,15 @@ func (l Loader) Load(ctx context.Context, dir string) (*Result, error) {
 	graph := ParseGraph(graphOut, selected)
 	graph.AddRoot(mainPath)
 
+	// The difference between these two package sets identifies dependencies that
+	// are reachable only from tests.
+	runtimePackages, runtimeOK, runtimeWarning := l.loadPackages(ctx, root, false)
+	testPackages, testOK, testWarning := l.loadPackages(ctx, root, true)
+	packages := mergePackages(runtimePackages, testPackages)
+	packageAnalysis := runtimeOK && testOK
+	packageWarning := strings.Join(nonEmpty(runtimeWarning, testWarning), "; ")
+	integrity := l.verifyIntegrity(ctx, root, len(listed) > 1)
+
 	_, mainRequirements, err = readManifest(gomod, selected)
 	if err != nil {
 		return nil, fmt.Errorf("read go.mod requirements: %w", err)
@@ -137,6 +165,12 @@ func (l Loader) Load(ctx context.Context, dir string) (*Result, error) {
 	}
 	manifestAudited := map[string]bool{mainPath: true}
 	var warnings []string
+	if retractionWarning != "" {
+		warnings = append(warnings, retractionWarning)
+	}
+	if packageWarning != "" {
+		warnings = append(warnings, packageWarning)
+	}
 	for _, listedModule := range listed {
 		if listedModule.Main || listedModule.GoMod == "" {
 			continue
@@ -156,11 +190,188 @@ func (l Loader) Load(ctx context.Context, dir string) (*Result, error) {
 		}
 		modules[i].Requires = reqs
 		modules[i].ManifestAudited = manifestAudited[modules[i].Path]
+		modules[i].PackagesLoaded = len(packages[modules[i].Path]) > 0
+		switch {
+		case len(runtimePackages[modules[i].Path]) > 0:
+			modules[i].Scope = model.ScopeRuntime
+		case len(testPackages[modules[i].Path]) > 0:
+			modules[i].Scope = model.ScopeTestOnly
+		default:
+			modules[i].Scope = model.ScopeGraphOnly
+		}
 	}
 
-	return &Result{Root: root, MainModule: mainPath, GoDirective: goDirective, Toolchain: toolchain, Modules: modules, Graph: graph, Warnings: warnings}, nil
+	return &Result{
+		Root: root, MainModule: mainPath, MainRequirements: mainRequirements,
+		GoDirective: goDirective, Toolchain: toolchain, Modules: modules, Graph: graph,
+		Packages: packages, RuntimePackages: runtimePackages, TestPackages: testPackages,
+		PackageAnalysis: packageAnalysis, Integrity: integrity, Warnings: warnings,
+	}, nil
 }
 
+// loadRetractions enriches selected modules with exact-version retraction reasons.
+func (l Loader) loadRetractions(ctx context.Context, root string, listed []goListModule) string {
+	const chunkSize = 100
+	type selectedModule struct {
+		index int
+		key   string
+	}
+	var selected []selectedModule
+	for i, module := range listed {
+		if module.Main || module.Version == "" || (module.Replace != nil && module.Replace.Version == "") {
+			continue
+		}
+		path, version := module.Path, module.Version
+		if module.Replace != nil && module.Replace.Path != "" && module.Replace.Version != "" {
+			path, version = module.Replace.Path, module.Replace.Version
+		}
+		selected = append(selected, selectedModule{index: i, key: path + "@" + version})
+	}
+	for start := 0; start < len(selected); start += chunkSize {
+		// Chunking bounds command-line size for applications with large module graphs.
+		end := min(start+chunkSize, len(selected))
+		args := []string{"list", "-m", "-json", "-retracted"}
+		for _, module := range selected[start:end] {
+			args = append(args, module.key)
+		}
+		out, err := l.Runner.Run(ctx, root, "go", args...)
+		if err != nil {
+			return fmt.Sprintf("retraction metadata unavailable: %v: %s", err, strings.TrimSpace(string(out)))
+		}
+		records, err := decodeModuleStream(out)
+		if err != nil {
+			return "retraction metadata unavailable: " + err.Error()
+		}
+		byKey := make(map[string][]string, len(records))
+		for _, record := range records {
+			byKey[record.Path+"@"+record.Version] = record.Retracted
+		}
+		for _, module := range selected[start:end] {
+			listed[module.index].Retracted = append([]string(nil), byKey[module.key]...)
+		}
+	}
+	return ""
+}
+
+// goListPackage models package ownership and load errors from `go list -json`.
+type goListPackage struct {
+	ImportPath string        `json:"ImportPath"`
+	Module     *goListModule `json:"Module"`
+	Incomplete bool          `json:"Incomplete"`
+	Error      *struct {
+		Err string `json:"Err"`
+	} `json:"Error"`
+}
+
+// loadPackages maps selected modules to imported packages for production or test builds.
+func (l Loader) loadPackages(ctx context.Context, root string, includeTests bool) (map[string][]string, bool, string) {
+	args := []string{"list", "-buildvcs=false", "-deps"}
+	if includeTests {
+		args = append(args, "-test")
+	}
+	args = append(args, "-e", "-json", "./...")
+	out, err := l.Runner.Run(ctx, root, "go", args...)
+	if err != nil {
+		return nil, false, fmt.Sprintf("resolve imported packages: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	dec := json.NewDecoder(bytes.NewReader(out))
+	packages := map[string][]string{}
+	complete := true
+	var packageErrors []string
+	for {
+		var pkg goListPackage
+		err := dec.Decode(&pkg)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, false, fmt.Sprintf("decode imported packages: %v", err)
+		}
+		if pkg.Incomplete || pkg.Error != nil {
+			complete = false
+			if pkg.Error != nil && pkg.Error.Err != "" {
+				packageErrors = append(packageErrors, pkg.Error.Err)
+			}
+		}
+		if pkg.Module == nil || pkg.Module.Path == "" || pkg.ImportPath == "" {
+			continue
+		}
+		packages[pkg.Module.Path] = appendUnique(packages[pkg.Module.Path], pkg.ImportPath)
+	}
+	for module := range packages {
+		sort.Strings(packages[module])
+	}
+	if !complete {
+		detail := strings.Join(uniqueSortedStrings(packageErrors), "; ")
+		if detail != "" {
+			return packages, false, "imported package analysis incomplete: " + detail
+		}
+		return packages, false, "imported package analysis incomplete"
+	}
+	return packages, true, ""
+}
+
+// mergePackages returns the sorted union of package maps grouped by module path.
+func mergePackages(groups ...map[string][]string) map[string][]string {
+	out := map[string][]string{}
+	for _, group := range groups {
+		for module, packages := range group {
+			for _, pkg := range packages {
+				out[module] = appendUnique(out[module], pkg)
+			}
+			sort.Strings(out[module])
+		}
+	}
+	return out
+}
+
+// nonEmpty filters empty strings while retaining the input order.
+func nonEmpty(values ...string) []string {
+	var out []string
+	for _, value := range values {
+		if value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+// verifyIntegrity records go.sum presence and the result of `go mod verify`.
+func (l Loader) verifyIntegrity(ctx context.Context, root string, hasDependencies bool) model.Integrity {
+	integrity := model.Integrity{}
+	if hasDependencies {
+		if _, err := os.Stat(filepath.Join(root, "go.sum")); os.IsNotExist(err) {
+			integrity.MissingGoSum = true
+		}
+	}
+	out, err := l.Runner.Run(ctx, root, "go", "mod", "verify")
+	if err != nil {
+		integrity.Error = strings.TrimSpace(string(out))
+		if integrity.Error == "" {
+			integrity.Error = err.Error()
+		}
+		return integrity
+	}
+	integrity.Verified = true
+	return integrity
+}
+
+// uniqueSortedStrings removes duplicate strings and sorts the result.
+func uniqueSortedStrings(values []string) []string {
+	seen := map[string]struct{}{}
+	var out []string
+	for _, value := range values {
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// readGoSettings extracts go and toolchain directives from a go.mod file.
 func readGoSettings(path string) (goDirective, toolchain string, err error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -179,6 +390,7 @@ func readGoSettings(path string) (goDirective, toolchain string, err error) {
 	return goDirective, toolchain, nil
 }
 
+// decodeModuleStream decodes the concatenated JSON objects emitted by `go list`.
 func decodeModuleStream(data []byte) ([]goListModule, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	var out []goListModule
@@ -199,6 +411,7 @@ func decodeModuleStream(data []byte) ([]goListModule, error) {
 	return out, nil
 }
 
+// readManifest parses one go.mod and annotates requirements with MVS-selected versions.
 func readManifest(path string, selected map[string]string) (string, []model.ModuleRequirement, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -244,9 +457,7 @@ type Graph struct {
 // NewGraph creates an empty dependency graph using the supplied MVS-selected versions.
 func NewGraph(selected map[string]string) *Graph {
 	copySelected := make(map[string]string, len(selected))
-	for k, v := range selected {
-		copySelected[k] = v
-	}
+	maps.Copy(copySelected, selected)
 	return &Graph{adj: map[string][]string{}, requirements: map[string][]model.ModuleRequirement{}, selected: copySelected}
 }
 
@@ -306,10 +517,8 @@ func (g *Graph) AddRoot(path string) {
 	if path == "" {
 		return
 	}
-	for _, r := range g.roots {
-		if r == path {
-			return
-		}
+	if slices.Contains(g.roots, path) {
+		return
 	}
 	g.roots = append(g.roots, path)
 }
@@ -363,6 +572,7 @@ func (g *Graph) PathsTo(target string, limit int) [][]model.ModuleRef {
 	return results
 }
 
+// appendRequirement adds v unless an equivalent requirement already exists.
 func appendRequirement(in []model.ModuleRequirement, v model.ModuleRequirement) []model.ModuleRequirement {
 	for _, existing := range in {
 		if existing.Path == v.Path && existing.Version == v.Version && existing.SelectedVersion == v.SelectedVersion {
@@ -372,20 +582,15 @@ func appendRequirement(in []model.ModuleRequirement, v model.ModuleRequirement) 
 	return append(in, v)
 }
 
+// appendUnique adds v only when it is not already present.
 func appendUnique(in []string, v string) []string {
-	for _, x := range in {
-		if x == v {
-			return in
-		}
+	if slices.Contains(in, v) {
+		return in
 	}
 	return append(in, v)
 }
 
+// contains reports whether xs contains v.
 func contains(xs []string, v string) bool {
-	for _, x := range xs {
-		if x == v {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(xs, v)
 }

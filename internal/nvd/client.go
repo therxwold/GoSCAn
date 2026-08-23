@@ -32,12 +32,14 @@ type Record struct {
 	KnownExploited bool
 }
 
+// apiResponse models the top-level NVD CVE API response.
 type apiResponse struct {
 	Vulnerabilities []struct {
 		CVE apiCVE `json:"cve"`
 	} `json:"vulnerabilities"`
 }
 
+// apiCVE models the NVD fields retained during finding enrichment.
 type apiCVE struct {
 	ID           string `json:"id"`
 	Descriptions []struct {
@@ -62,6 +64,7 @@ type apiCVE struct {
 	CISAExploitAdd string `json:"cisaExploitAdd"`
 }
 
+// metric models one NVD CVSS metric across supported CVSS versions.
 type metric struct {
 	Type     string `json:"type"`
 	CVSSData struct {
@@ -134,6 +137,7 @@ func (c Client) Query(ctx context.Context, cves []string) (map[string]Record, er
 	return out, nil
 }
 
+// normalize converts one NVD CVE into the scanner's enrichment record.
 func normalize(cve apiCVE) Record {
 	r := Record{ID: cve.ID, KnownExploited: cve.CISAExploitAdd != ""}
 	for _, d := range cve.Descriptions {
@@ -170,6 +174,8 @@ func normalize(cve apiCVE) Record {
 				Score:   m.CVSSData.BaseScore,
 				Source:  string(model.SourceNVD),
 			}
+			// NVD may publish several CVSS generations. Use the highest score as the
+			// conservative normalized risk while retaining its original version.
 			if r.CVSS == nil || candidate.Score > r.CVSS.Score {
 				r.CVSS = candidate
 				severity := m.CVSSData.BaseSeverity
@@ -183,6 +189,7 @@ func normalize(cve apiCVE) Record {
 	return r
 }
 
+// parseSeverity maps NVD severity labels to normalized model values.
 func parseSeverity(v string) model.Severity {
 	switch strings.ToLower(v) {
 	case "critical":
@@ -198,6 +205,7 @@ func parseSeverity(v string) model.Severity {
 	}
 }
 
+// unique removes empty and duplicate strings and returns a sorted result.
 func unique(in []string) []string {
 	seen := map[string]bool{}
 	out := make([]string, 0, len(in))

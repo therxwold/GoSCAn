@@ -19,6 +19,7 @@ type Client struct {
 	HTTPClient *http.Client
 }
 
+// apiResponse models the score rows returned by the FIRST EPSS API.
 type apiResponse struct {
 	Data []struct {
 		CVE        string `json:"cve"`
@@ -81,6 +82,7 @@ func (c Client) Query(ctx context.Context, cves []string) (map[string]model.EPSS
 	return out, nil
 }
 
+// chunkCVEs deduplicates identifiers and groups them under a query-length limit.
 func chunkCVEs(cves []string, maxChars int) [][]string {
 	var batches [][]string
 	var cur []string

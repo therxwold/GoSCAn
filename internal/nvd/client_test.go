@@ -9,6 +9,7 @@ import (
 	"github.com/therxwold/GoSCAn/internal/model"
 )
 
+// TestQuery verifies NVD request handling and CVE normalization.
 func TestQuery(t *testing.T) {
 	var apiKey string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -45,6 +46,7 @@ func TestQuery(t *testing.T) {
 	}
 }
 
+// TestNormalizeIncludesCVSSV2 verifies support for legacy CVSS 2.0 metrics.
 func TestNormalizeIncludesCVSSV2(t *testing.T) {
 	var cve apiCVE
 	cve.ID = "CVE-2026-2000"

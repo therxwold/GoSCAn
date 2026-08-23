@@ -7,6 +7,7 @@ import (
 	"testing"
 )
 
+// TestLatestStableRelease verifies stable release selection from go.dev data.
 func TestLatestStableRelease(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/dl/" || r.URL.Query().Get("mode") != "json" {
@@ -25,6 +26,7 @@ func TestLatestStableRelease(t *testing.T) {
 	}
 }
 
+// TestSupportedReleaseLines verifies Go's two-release support window.
 func TestSupportedReleaseLines(t *testing.T) {
 	if !Supported("1.26", "1.26") || !Supported("1.25", "1.26") {
 		t.Fatal("latest two release lines should be supported")

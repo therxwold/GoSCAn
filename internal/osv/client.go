@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -26,26 +27,32 @@ type Client struct {
 
 // Target identifies one selected Go module version to query in OSV.
 type Target struct {
-	Key     string
-	Path    string
-	Version string
+	Key           string
+	Path          string
+	Version       string
+	Packages      []string
+	PackagesKnown bool
 }
 
+// query is one module-version request in an OSV batch query.
 type query struct {
 	Version   string       `json:"version,omitempty"`
 	Package   queryPackage `json:"package"`
 	PageToken string       `json:"page_token,omitempty"`
 }
 
+// queryPackage identifies an ecosystem package in an OSV request.
 type queryPackage struct {
 	Name      string `json:"name"`
 	Ecosystem string `json:"ecosystem"`
 }
 
+// batchRequest is the request envelope for OSV's batch endpoint.
 type batchRequest struct {
 	Queries []query `json:"queries"`
 }
 
+// batchResponse models paginated vulnerability identifiers returned per query.
 type batchResponse struct {
 	Results []struct {
 		Vulns []struct {
@@ -83,7 +90,13 @@ type Record struct {
 				Limit        string `json:"limit,omitempty"`
 			} `json:"events"`
 		} `json:"ranges"`
-		Versions []string `json:"versions"`
+		Versions          []string `json:"versions"`
+		EcosystemSpecific struct {
+			Imports []struct {
+				Path    string   `json:"path"`
+				Symbols []string `json:"symbols"`
+			} `json:"imports"`
+		} `json:"ecosystem_specific"`
 	} `json:"affected"`
 	References []struct {
 		Type string `json:"type"`
@@ -109,6 +122,8 @@ func (c Client) Query(ctx context.Context, targets []Target) (map[string][]model
 	idsByTarget := make(map[string][]string, len(targets))
 	pending := append([]Target(nil), targets...)
 	pageTokens := map[string]string{}
+	// OSV paginates each batch element independently, so only targets carrying a
+	// next-page token are sent in the following batch.
 	for len(pending) > 0 {
 		reqPayload := batchRequest{Queries: make([]query, 0, len(pending))}
 		for _, t := range pending {
@@ -160,6 +175,11 @@ func (c Client) Query(ctx context.Context, targets []Target) (map[string][]model
 		}
 		groups := groupAliases(rs)
 		for _, group := range groups {
+			// Package metadata can eliminate module-level false positives only when
+			// package loading completed successfully.
+			if !groupAffectsPackages(t, group) {
+				continue
+			}
 			out[t.Key] = append(out[t.Key], mergeGroup(t.Path, t.Version, group))
 		}
 		sort.Slice(out[t.Key], func(i, j int) bool { return out[t.Key][i].ID < out[t.Key][j].ID })
@@ -167,6 +187,35 @@ func (c Client) Query(ctx context.Context, targets []Target) (map[string][]model
 	return out, nil
 }
 
+// groupAffectsPackages uses the Go vulnerability database's affected import
+// paths when package loading succeeded. Records without package-level metadata
+// remain reportable so non-Go OSV records are handled conservatively.
+func groupAffectsPackages(target Target, records []Record) bool {
+	if !target.PackagesKnown {
+		return true
+	}
+	loaded := make(map[string]struct{}, len(target.Packages))
+	for _, pkg := range target.Packages {
+		loaded[pkg] = struct{}{}
+	}
+	hasImportMetadata := false
+	for _, record := range records {
+		for _, affected := range record.Affected {
+			if affected.Package.Ecosystem != "Go" || affected.Package.Name != target.Path {
+				continue
+			}
+			for _, imported := range affected.EcosystemSpecific.Imports {
+				hasImportMetadata = true
+				if _, ok := loaded[imported.Path]; ok {
+					return true
+				}
+			}
+		}
+	}
+	return !hasImportMetadata
+}
+
+// fetchRecords concurrently retrieves complete OSV records for advisory identifiers.
 func fetchRecords(ctx context.Context, hc *http.Client, base string, ids map[string]struct{}) (map[string]Record, error) {
 	out := make(map[string]Record, len(ids))
 	var mu sync.Mutex
@@ -174,7 +223,6 @@ func fetchRecords(ctx context.Context, hc *http.Client, base string, ids map[str
 	sem := make(chan struct{}, 8)
 	var wg sync.WaitGroup
 	for id := range ids {
-		id := id
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -199,6 +247,7 @@ func fetchRecords(ctx context.Context, hc *http.Client, base string, ids map[str
 	return out, firstErr
 }
 
+// doJSON performs one OSV JSON request and decodes a successful response.
 func doJSON(ctx context.Context, hc *http.Client, method, endpoint string, body any, dst any) error {
 	var reader io.Reader
 	if body != nil {
@@ -227,6 +276,7 @@ func doJSON(ctx context.Context, hc *http.Client, method, endpoint string, body 
 	return json.NewDecoder(resp.Body).Decode(dst)
 }
 
+// groupAliases joins records connected through any shared advisory identifier.
 func groupAliases(records []Record) [][]Record {
 	var groups [][]Record
 	for _, r := range records {
@@ -252,6 +302,7 @@ func groupAliases(records []Record) [][]Record {
 	return groups
 }
 
+// groupIntersects reports whether a record group shares any identifier with ids.
 func groupIntersects(group []Record, ids map[string]struct{}) bool {
 	for _, r := range group {
 		for id := range identifierSet(r) {
@@ -263,6 +314,7 @@ func groupIntersects(group []Record, ids map[string]struct{}) bool {
 	return false
 }
 
+// identifierSet returns the primary ID and aliases associated with an OSV record.
 func identifierSet(r Record) map[string]struct{} {
 	m := map[string]struct{}{r.ID: {}}
 	for _, a := range r.Aliases {
@@ -271,12 +323,14 @@ func identifierSet(r Record) map[string]struct{} {
 	return m
 }
 
+// mergeGroup normalizes one alias-connected OSV group into a single vulnerability.
 func mergeGroup(modulePath, current string, records []Record) model.Vulnerability {
 	sort.SliceStable(records, func(i, j int) bool { return idPreference(records[i].ID) < idPreference(records[j].ID) })
 	primary := records[0]
 	ids := map[string]struct{}{}
 	var cves []string
 	var refs []string
+	imports := map[string][]string{}
 	fixed := ""
 	severity := model.SeverityUnknown
 	var bestCVSS *model.CVSS
@@ -285,6 +339,8 @@ func mergeGroup(modulePath, current string, records []Record) model.Vulnerabilit
 		for _, a := range r.Aliases {
 			ids[a] = struct{}{}
 		}
+		// Alias records may expose different ranges; choose the earliest fix that
+		// closes the range containing the selected version.
 		if f := fixedVersion(r, modulePath, current); f != "" {
 			f = goversion.NormalizeForGo(f)
 			if fixed == "" || goversion.Compare(f, fixed) < 0 {
@@ -300,6 +356,19 @@ func mergeGroup(modulePath, current string, records []Record) model.Vulnerabilit
 		for _, ref := range r.References {
 			if ref.URL != "" {
 				refs = appendUnique(refs, ref.URL)
+			}
+		}
+		for _, affected := range r.Affected {
+			if affected.Package.Ecosystem != "Go" || affected.Package.Name != modulePath {
+				continue
+			}
+			for _, imported := range affected.EcosystemSpecific.Imports {
+				for _, symbol := range imported.Symbols {
+					imports[imported.Path] = appendUnique(imports[imported.Path], symbol)
+				}
+				if _, ok := imports[imported.Path]; !ok {
+					imports[imported.Path] = nil
+				}
 			}
 		}
 	}
@@ -318,13 +387,20 @@ func mergeGroup(modulePath, current string, records []Record) model.Vulnerabilit
 	if bestCVSS != nil {
 		severity = severityFromScore(bestCVSS.Score)
 	}
+	affectedImports := make([]model.AffectedImport, 0, len(imports))
+	for path, symbols := range imports {
+		sort.Strings(symbols)
+		affectedImports = append(affectedImports, model.AffectedImport{Path: path, Symbols: symbols})
+	}
+	sort.Slice(affectedImports, func(i, j int) bool { return affectedImports[i].Path < affectedImports[j].Path })
 	return model.Vulnerability{
 		ID: primary.ID, Aliases: allIDs, Summary: primary.Summary, Details: primary.Details,
 		CVEs: cves, Fixed: fixed, CVSS: bestCVSS, Severity: severity, References: refs,
-		Sources: []model.AdvisorySource{model.SourceOSV},
+		Sources: []model.AdvisorySource{model.SourceOSV}, AffectedImports: affectedImports,
 	}
 }
 
+// fixedVersion returns the earliest fix closing the vulnerable range containing current.
 func fixedVersion(r Record, modulePath, current string) string {
 	cur := strings.TrimPrefix(current, "v")
 	best := ""
@@ -357,6 +433,7 @@ func fixedVersion(r Record, modulePath, current string) string {
 	return best
 }
 
+// bestCVSSForRecord returns the highest valid CVSS score applicable to modulePath.
 func bestCVSSForRecord(r Record, modulePath string) *model.CVSS {
 	type sev struct{ Type, Score string }
 	var candidates []sev
@@ -388,6 +465,7 @@ func bestCVSSForRecord(r Record, modulePath string) *model.CVSS {
 	return best
 }
 
+// severityFromDatabaseSpecific normalizes OSV database-specific severity metadata.
 func severityFromDatabaseSpecific(m map[string]any) model.Severity {
 	v, _ := m["severity"].(string)
 	switch strings.ToLower(v) {
@@ -404,6 +482,7 @@ func severityFromDatabaseSpecific(m map[string]any) model.Severity {
 	}
 }
 
+// severityFromScore maps a CVSS base score to the normalized severity bands.
 func severityFromScore(score float64) model.Severity {
 	switch {
 	case score >= 9:
@@ -419,6 +498,7 @@ func severityFromScore(score float64) model.Severity {
 	}
 }
 
+// idPreference ranks Go, GHSA, CVE, and unknown IDs for canonical selection.
 func idPreference(id string) int {
 	switch {
 	case strings.HasPrefix(id, "GO-"):
@@ -432,11 +512,10 @@ func idPreference(id string) int {
 	}
 }
 
+// appendUnique adds v only when it is not already present.
 func appendUnique(in []string, v string) []string {
-	for _, x := range in {
-		if x == v {
-			return in
-		}
+	if slices.Contains(in, v) {
+		return in
 	}
 	return append(in, v)
 }

@@ -6,27 +6,31 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/therxwold/GoSCAn/internal/baseline"
 	"github.com/therxwold/GoSCAn/internal/config"
 	"github.com/therxwold/GoSCAn/internal/fixer"
 	"github.com/therxwold/GoSCAn/internal/githubadvisory"
 	"github.com/therxwold/GoSCAn/internal/githubrepo"
+	"github.com/therxwold/GoSCAn/internal/model"
 	"github.com/therxwold/GoSCAn/internal/nvd"
 	"github.com/therxwold/GoSCAn/internal/output"
 	"github.com/therxwold/GoSCAn/internal/scanner"
 )
 
 // Version is the current GoSCAn version.
-const Version string = "v0.4.0"
+const Version string = "v0.4.1"
 
 // Run starts GoSCAn and exits with the command result code.
 func Run() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
+// run dispatches a CLI invocation and returns its process exit code.
 func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) > 0 {
 		switch args[0] {
@@ -47,6 +51,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	return runScan(args, stdout, stderr)
 }
 
+// runScan parses scan flags, executes one scan, renders its report, and evaluates CI thresholds.
 func runScan(args []string, stdout, stderr io.Writer) int {
 	cfg, configPath, err := loadCommandConfig(args)
 	if err != nil {
@@ -68,6 +73,7 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 	noGitHub := fs.Bool("no-github", false, "disable GitHub Advisory Database enrichment")
 	noNVD := fs.Bool("no-nvd", false, "disable NVD enrichment")
 	noEPSS := fs.Bool("no-epss", !cfg.EPSS.Enabled, "disable FIRST EPSS enrichment")
+	noReachability := fs.Bool("no-reachability", false, "disable govulncheck symbol and call-path analysis")
 	showIgnored := fs.Bool("show-ignored", cfg.Ignore.Show, "show findings suppressed as false positives")
 	showManifests := fs.Bool("show-manifests", cfg.Scan.ShowManifests, "show requirements declared by selected dependency manifests")
 	strictEnrichment := fs.Bool("strict-enrichment", cfg.Scan.StrictEnrichment, "fail when an enabled enrichment source is unavailable")
@@ -82,6 +88,8 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 		return addIgnoreRule(ignoreRules, value)
 	})
 	timeout := fs.Duration("timeout", cfg.Scan.Timeout, "overall scan timeout")
+	baselinePath := fs.String("baseline", "", "compare findings with a saved baseline JSON file")
+	saveBaseline := fs.String("save-baseline", "", "save current findings as a baseline JSON file")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -161,11 +169,23 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 		StrictEnrichment: *strictEnrichment, RequireEPSS: *epssThreshold >= 0,
 		NoHealth: !*healthEnabled, NoGoVersion: !*goVersionEnabled,
 		RequireCurrentGo: *failOnOutdatedGo, RequireMaintained: *failOnUnmaintained,
-		StaleAfter: time.Duration(*staleAfterDays) * 24 * time.Hour, IgnoreRules: ignoreRules,
+		NoReachability: *noReachability, StaleAfter: time.Duration(*staleAfterDays) * 24 * time.Hour, IgnoreRules: ignoreRules,
 	})
 	if err != nil {
 		fmt.Fprintln(stderr, "goscan:", err)
 		return 2
+	}
+	if *baselinePath != "" {
+		if err := baseline.Apply(*baselinePath, report); err != nil {
+			fmt.Fprintln(stderr, "goscan:", err)
+			return 2
+		}
+	}
+	if *saveBaseline != "" {
+		if err := baseline.Save(*saveBaseline, report); err != nil {
+			fmt.Fprintln(stderr, "goscan:", err)
+			return 2
+		}
 	}
 	if err := output.Write(stdout, report, format, output.WriteOptions{ShowIgnored: *showIgnored, ShowManifests: *showManifests}); err != nil {
 		fmt.Fprintln(stderr, "goscan:", err)
@@ -177,6 +197,7 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+// runFix previews or applies remediation and latest-version upgrade plans.
 func runFix(args []string, stdout, stderr io.Writer) int {
 	cfg, configPath, err := loadCommandConfig(args)
 	if err != nil {
@@ -190,12 +211,14 @@ func runFix(args []string, stdout, stderr io.Writer) int {
 	_ = fs.String("config", configPath, "configuration file (default config.yml when present)")
 	_ = fs.Bool("no-config", false, "ignore config.yml and use built-in/environment defaults")
 	apply := fs.Bool("apply", false, "apply all available first-fixed-version recommendations")
+	latest := fs.Bool("latest", false, "preview newest dependency and Go upgrades; combine with --apply to apply them")
 	runTests := fs.Bool("test", cfg.Fix.RunTests, "run go test ./... after applying fixes")
 	githubEnabled := fs.Bool("github", cfg.GitHub.Enabled, "enable GitHub Advisory Database enrichment")
 	nvdEnabled := fs.Bool("nvd", cfg.NVD.Enabled, "enable NVD enrichment")
 	noGitHub := fs.Bool("no-github", false, "disable GitHub Advisory Database enrichment")
 	noNVD := fs.Bool("no-nvd", false, "disable NVD enrichment")
 	noEPSS := fs.Bool("no-epss", !cfg.EPSS.Enabled, "disable FIRST EPSS enrichment")
+	noReachability := fs.Bool("no-reachability", false, "disable govulncheck symbol and call-path analysis")
 	showIgnored := fs.Bool("show-ignored", cfg.Ignore.Show, "show findings suppressed as false positives")
 	showManifests := fs.Bool("show-manifests", cfg.Scan.ShowManifests, "show requirements declared by selected dependency manifests")
 	strictEnrichment := fs.Bool("strict-enrichment", cfg.Scan.StrictEnrichment, "fail when an enabled enrichment source is unavailable")
@@ -222,6 +245,10 @@ func runFix(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "goscan fix accepts at most one path")
 		return 2
 	}
+	if *latest && (*noHealth || *noGoVersion) {
+		fmt.Fprintln(stderr, "--latest cannot be combined with --no-health or --no-go-version")
+		return 2
+	}
 
 	dir := "."
 	if fs.NArg() == 1 {
@@ -238,6 +265,12 @@ func runFix(args []string, stdout, stderr io.Writer) int {
 	}
 	if *noGoVersion {
 		*goVersionEnabled = false
+	}
+	if *latest {
+		*healthEnabled = true
+		*goVersionEnabled = true
+		*upgradeGo = true
+		*upgradeToolchain = true
 	}
 
 	format, err := output.ParseFormat(*formatName)
@@ -263,11 +296,19 @@ func runFix(args []string, stdout, stderr io.Writer) int {
 	s.NVD = nvd.Client{APIKey: cfg.NVD.APIKey}
 	s.Repositories = githubrepo.Client{Token: cfg.GitHub.Token}
 	opts := scanner.Options{NoGitHub: !*githubEnabled, NoNVD: !*nvdEnabled, NoEPSS: *noEPSS, StrictEnrichment: *strictEnrichment,
-		NoHealth: !*healthEnabled, NoGoVersion: !*goVersionEnabled, StaleAfter: time.Duration(*staleAfterDays) * 24 * time.Hour, IgnoreRules: ignoreRules}
+		NoHealth: !*healthEnabled, NoGoVersion: !*goVersionEnabled, NoReachability: *noReachability,
+		StaleAfter: time.Duration(*staleAfterDays) * 24 * time.Hour, IgnoreRules: ignoreRules}
+	if *latest {
+		opts.RequireCurrentGo = true
+		opts.RequireLatestVersions = true
+	}
 	report, err := s.Scan(ctx, dir, opts)
 	if err != nil {
 		fmt.Fprintln(stderr, "goscan:", err)
 		return 2
+	}
+	if *latest {
+		report.UpgradePlan = fixer.LatestPlan(report, *fixVulnerabilities)
 	}
 	if !*apply {
 		if err := output.Write(stdout, report, format, output.WriteOptions{ShowIgnored: *showIgnored, ShowManifests: *showManifests}); err != nil {
@@ -279,19 +320,27 @@ func runFix(args []string, stdout, stderr io.Writer) int {
 
 	applier := fixer.Applier{}
 	applied := false
-	if *fixVulnerabilities && fixer.HasApplicable(report.Findings) {
-		if err := applier.Apply(ctx, report.Root, report.Findings, *runTests); err != nil {
+	if *latest {
+		applied, err = applier.ApplyLatest(ctx, report.Root, report, *fixVulnerabilities, *runTests)
+		if err != nil {
 			fmt.Fprintln(stderr, "goscan fix:", err)
 			return 2
 		}
-		applied = true
+	} else {
+		if *fixVulnerabilities && fixer.HasApplicable(report.Findings) {
+			if err := applier.Apply(ctx, report.Root, report.Findings, *runTests); err != nil {
+				fmt.Fprintln(stderr, "goscan fix:", err)
+				return 2
+			}
+			applied = true
+		}
+		goApplied, err := applier.ApplyGo(ctx, report.Root, report.Go, *upgradeGo, *upgradeToolchain, *runTests)
+		if err != nil {
+			fmt.Fprintln(stderr, "goscan fix:", err)
+			return 2
+		}
+		applied = applied || goApplied
 	}
-	goApplied, err := applier.ApplyGo(ctx, report.Root, report.Go, *upgradeGo, *upgradeToolchain, *runTests)
-	if err != nil {
-		fmt.Fprintln(stderr, "goscan fix:", err)
-		return 2
-	}
-	applied = applied || goApplied
 	if !applied {
 		if err := output.Write(stdout, report, format, output.WriteOptions{ShowIgnored: *showIgnored, ShowManifests: *showManifests}); err != nil {
 			fmt.Fprintln(stderr, err)
@@ -305,6 +354,7 @@ func runFix(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "goscan rescan:", err)
 		return 2
 	}
+	post.UpgradeResult = fixer.UpgradeDiff(report, post)
 	if err := output.Write(stdout, post, format, output.WriteOptions{ShowIgnored: *showIgnored, ShowManifests: *showManifests}); err != nil {
 		fmt.Fprintln(stderr, err)
 		return 2
@@ -315,6 +365,7 @@ func runFix(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+// loadCommandConfig resolves configuration-selection flags before command-specific flag parsing.
 func loadCommandConfig(args []string) (config.Config, string, error) {
 	if requestsHelp(args) {
 		return config.Default(), "config.yml", nil
@@ -330,6 +381,7 @@ func loadCommandConfig(args []string) (config.Config, string, error) {
 	return cfg, path, err
 }
 
+// configDisabled reports whether arguments explicitly disable configuration-file loading.
 func configDisabled(args []string) bool {
 	for _, arg := range args {
 		if arg == "--no-config" || arg == "--no-config=true" {
@@ -339,6 +391,7 @@ func configDisabled(args []string) bool {
 	return false
 }
 
+// requestsHelp reports whether arguments request command help.
 func requestsHelp(args []string) bool {
 	for _, arg := range args {
 		if arg == "-h" || arg == "--help" {
@@ -348,15 +401,15 @@ func requestsHelp(args []string) bool {
 	return false
 }
 
-func copyIgnoreRules(in map[string]string) map[string]string {
-	out := make(map[string]string, len(in))
-	for key, reason := range in {
-		out[key] = reason
-	}
+// copyIgnoreRules clones configured rules so CLI additions cannot mutate the loaded configuration.
+func copyIgnoreRules(in map[string]model.IgnoreRule) map[string]model.IgnoreRule {
+	out := make(map[string]model.IgnoreRule, len(in))
+	maps.Copy(out, in)
 	return out
 }
 
-func addIgnoreRule(rules map[string]string, value string) error {
+// addIgnoreRule parses one --ignore value and adds it to the active rule set.
+func addIgnoreRule(rules map[string]model.IgnoreRule, value string) error {
 	key, reason, hasReason := strings.Cut(strings.TrimSpace(value), "=")
 	key = strings.TrimSpace(key)
 	if key == "" {
@@ -369,10 +422,11 @@ func addIgnoreRule(rules map[string]string, value string) error {
 	if reason == "" {
 		return fmt.Errorf("--ignore reason cannot be empty")
 	}
-	rules[key] = reason
+	rules[key] = model.IgnoreRule{Reason: reason}
 	return nil
 }
 
+// usage writes the top-level command synopsis and common examples.
 func usage(w io.Writer) {
 	fmt.Fprintln(w, `GoSCAn - Go dependency vulnerability scanner and remediation planner
 
@@ -401,5 +455,6 @@ Examples:
   goscan scan --format=sarif > goscan.sarif
   goscan fix
   goscan fix --apply
+  goscan fix --apply --latest
   goscan fix --apply --upgrade-go --upgrade-toolchain`)
 }

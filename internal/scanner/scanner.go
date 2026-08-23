@@ -3,6 +3,7 @@ package scanner
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -18,32 +19,53 @@ import (
 	"github.com/therxwold/GoSCAn/internal/model"
 	"github.com/therxwold/GoSCAn/internal/nvd"
 	"github.com/therxwold/GoSCAn/internal/osv"
+	"github.com/therxwold/GoSCAn/internal/reachability"
 	"github.com/therxwold/GoSCAn/internal/versionresolver"
 )
 
+// dependencyLoader supplies the selected module graph and package inventory.
 type dependencyLoader interface {
 	Load(context.Context, string) (*dependency.Result, error)
 }
+
+// vulnSource finds vulnerabilities for selected module targets.
 type vulnSource interface {
 	Query(context.Context, []osv.Target) (map[string][]model.Vulnerability, error)
 }
+
+// githubSource supplies GitHub advisory enrichment records.
 type githubSource interface {
 	Query(context.Context, []string) (map[string]githubadvisory.Record, error)
 }
+
+// nvdSource supplies NVD enrichment records.
 type nvdSource interface {
 	Query(context.Context, []string) (map[string]nvd.Record, error)
 }
+
+// epssSource supplies exploit-probability scores for CVEs.
 type epssSource interface {
 	Query(context.Context, []string) (map[string]model.EPSS, error)
 }
+
+// latestResolver resolves the newest available version of a module.
 type latestResolver interface {
 	Latest(context.Context, string, string) (string, error)
 }
+
+// goReleaseSource resolves the newest stable Go release.
 type goReleaseSource interface {
 	Latest(context.Context) (gorelease.Release, error)
 }
+
+// repositorySource supplies dependency maintenance metadata.
 type repositorySource interface {
 	Query(context.Context, []string, time.Time) (map[string]githubrepo.Record, error)
+}
+
+// reachabilitySource supplies source-level vulnerable call evidence.
+type reachabilitySource interface {
+	Analyze(context.Context, string) (map[string]reachability.Evidence, error)
 }
 
 // Scanner orchestrates dependency discovery, vulnerability lookup, risk enrichment, and remediation planning.
@@ -56,23 +78,26 @@ type Scanner struct {
 	Versions        latestResolver
 	GoReleases      goReleaseSource
 	Repositories    repositorySource
+	Reachability    reachabilitySource
 	Now             func() time.Time
 	ToolVersion     string
 }
 
 // Options controls optional scan behavior.
 type Options struct {
-	NoGitHub          bool
-	NoNVD             bool
-	NoEPSS            bool
-	StrictEnrichment  bool
-	RequireEPSS       bool
-	NoGoVersion       bool
-	NoHealth          bool
-	RequireCurrentGo  bool
-	RequireMaintained bool
-	StaleAfter        time.Duration
-	IgnoreRules       map[string]string
+	NoGitHub              bool
+	NoNVD                 bool
+	NoEPSS                bool
+	StrictEnrichment      bool
+	RequireEPSS           bool
+	NoGoVersion           bool
+	NoHealth              bool
+	RequireCurrentGo      bool
+	RequireMaintained     bool
+	RequireLatestVersions bool
+	NoReachability        bool
+	StaleAfter            time.Duration
+	IgnoreRules           map[string]model.IgnoreRule
 }
 
 // New returns a Scanner wired to the default Go, OSV, GitHub, NVD, EPSS, and version providers.
@@ -86,6 +111,7 @@ func New() *Scanner {
 		Versions:        versionresolver.Resolver{},
 		GoReleases:      gorelease.Client{},
 		Repositories:    githubrepo.Client{},
+		Reachability:    reachability.Analyzer{},
 		Now:             time.Now,
 	}
 }
@@ -99,8 +125,19 @@ func (s *Scanner) Scan(ctx context.Context, dir string, opts Options) (*model.Re
 	if err != nil {
 		return nil, err
 	}
-	report := &model.Report{Root: deps.Root, ToolVersion: s.ToolVersion, Module: deps.MainModule, ScannedAt: s.now().UTC()}
+	report := &model.Report{
+		Root: deps.Root, ToolVersion: s.ToolVersion, Module: deps.MainModule,
+		MainRequirements: deps.MainRequirements, PackageAnalysis: deps.PackageAnalysis,
+		ScannedAt: s.now().UTC(),
+		Integrity: &deps.Integrity,
+	}
 	report.Warnings = append(report.Warnings, deps.Warnings...)
+	if deps.Integrity.MissingGoSum {
+		report.Warnings = append(report.Warnings, "go.sum is missing for a module with dependencies")
+	}
+	if deps.Integrity.Error != "" {
+		report.Warnings = append(report.Warnings, "go mod verify failed: "+deps.Integrity.Error)
+	}
 	if err := s.checkGoVersion(ctx, deps, report, opts); err != nil {
 		if opts.StrictEnrichment || opts.RequireCurrentGo {
 			return nil, err
@@ -110,6 +147,7 @@ func (s *Scanner) Scan(ctx context.Context, dir string, opts Options) (*model.Re
 
 	moduleByKey := map[string]model.Module{}
 	var targets []osv.Target
+	// Build OSV targets from the exact MVS-selected versions and package sets.
 	for _, m := range deps.Modules {
 		if m.Main {
 			continue
@@ -136,16 +174,21 @@ func (s *Scanner) Scan(ctx context.Context, dir string, opts Options) (*model.Re
 		}
 		key := m.Path + "@" + m.Version
 		moduleByKey[key] = m
-		targets = append(targets, osv.Target{Key: key, Path: path, Version: version})
+		packages := remapPackagePaths(deps.Packages[m.Path], m.Path, path)
+		targets = append(targets, osv.Target{
+			Key: key, Path: path, Version: version,
+			Packages: packages, PackagesKnown: deps.PackageAnalysis,
+		})
 	}
 
 	if err := s.enrichDependencyHealth(ctx, deps, report, opts); err != nil {
-		if opts.StrictEnrichment || opts.RequireMaintained {
+		if opts.StrictEnrichment || opts.RequireMaintained || opts.RequireLatestVersions {
 			return nil, err
 		}
 		report.Warnings = append(report.Warnings, err.Error())
 	}
 
+	// OSV remains authoritative; optional sources below only enrich these findings.
 	found, err := s.Vulnerabilities.Query(ctx, targets)
 	if err != nil {
 		return nil, err
@@ -168,10 +211,27 @@ func (s *Scanner) Scan(ctx context.Context, dir string, opts Options) (*model.Re
 			latestCache[target.Path] = latest
 		}
 		for _, v := range vulns {
+			// Advisory import metadata may narrow a runtime module to a test-only
+			// finding when the affected package is imported exclusively by tests.
+			findingModule := m
+			findingModule.Scope = vulnerabilityScope(v, m.Scope,
+				remapPackagePaths(deps.RuntimePackages[m.Path], m.Path, target.Path),
+				remapPackagePaths(deps.TestPackages[m.Path], m.Path, target.Path))
+			reachability := model.ReachabilityModule
+			if findingModule.Scope == model.ScopeRuntime || findingModule.Scope == model.ScopeTestOnly {
+				reachability = model.ReachabilityPackage
+			}
 			report.Findings = append(report.Findings, model.Finding{
-				Module: m, Vulnerability: v, LatestVersion: latest, Paths: deps.Graph.PathsTo(m.Path, 3),
+				Module: findingModule, Vulnerability: v, LatestVersion: latest,
+				Paths: deps.Graph.PathsTo(m.Path, 3), Reachability: reachability,
 			})
 		}
+	}
+	if err := s.enrichReachability(ctx, report, opts); err != nil {
+		if opts.StrictEnrichment {
+			return nil, err
+		}
+		report.Warnings = append(report.Warnings, err.Error())
 	}
 
 	if err := s.enrichGitHub(ctx, report, opts); err != nil {
@@ -223,6 +283,94 @@ func (s *Scanner) Scan(ctx context.Context, dir string, opts Options) (*model.Re
 	return report, nil
 }
 
+// vulnerabilityScope classifies a finding using its affected package metadata.
+func vulnerabilityScope(v model.Vulnerability, fallback model.DependencyScope, runtimePackages, testPackages []string) model.DependencyScope {
+	if len(v.AffectedImports) == 0 {
+		return fallback
+	}
+	runtime := make(map[string]struct{}, len(runtimePackages))
+	tests := make(map[string]struct{}, len(testPackages))
+	for _, pkg := range runtimePackages {
+		runtime[pkg] = struct{}{}
+	}
+	for _, pkg := range testPackages {
+		tests[pkg] = struct{}{}
+	}
+	for _, imported := range v.AffectedImports {
+		if _, ok := runtime[imported.Path]; ok {
+			return model.ScopeRuntime
+		}
+	}
+	for _, imported := range v.AffectedImports {
+		if _, ok := tests[imported.Path]; ok {
+			return model.ScopeTestOnly
+		}
+	}
+	return fallback
+}
+
+// enrichReachability merges govulncheck evidence into matching report findings.
+func (s *Scanner) enrichReachability(ctx context.Context, report *model.Report, opts Options) error {
+	if opts.NoReachability || s.Reachability == nil || len(report.Findings) == 0 {
+		return nil
+	}
+	evidence, err := s.Reachability.Analyze(ctx, report.Root)
+	if err != nil {
+		return fmt.Errorf("reachability analysis failed: %w", err)
+	}
+	for i := range report.Findings {
+		finding := &report.Findings[i]
+		for _, id := range findingIdentifiers(*finding) {
+			e, ok := evidence[id]
+			if !ok {
+				continue
+			}
+			if reachabilityRank(e.Level) > reachabilityRank(finding.Reachability) {
+				finding.Reachability = e.Level
+			}
+			finding.CallStacks = append(finding.CallStacks, e.CallStacks...)
+		}
+	}
+	return nil
+}
+
+// findingIdentifiers returns every primary and alias identifier for a finding.
+func findingIdentifiers(f model.Finding) []string {
+	ids := []string{f.Vulnerability.ID}
+	ids = append(ids, f.Vulnerability.Aliases...)
+	ids = append(ids, f.Vulnerability.CVEs...)
+	return ids
+}
+
+// reachabilityRank orders module, package, symbol, and called evidence by strength.
+func reachabilityRank(level model.Reachability) int {
+	switch level {
+	case model.ReachabilityCalled:
+		return 4
+	case model.ReachabilitySymbol:
+		return 3
+	case model.ReachabilityPackage:
+		return 2
+	case model.ReachabilityModule:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// remapPackagePaths translates original import paths to a versioned replacement target.
+func remapPackagePaths(packages []string, modulePath, targetPath string) []string {
+	out := make([]string, 0, len(packages))
+	for _, pkg := range packages {
+		if modulePath != targetPath && (pkg == modulePath || strings.HasPrefix(pkg, modulePath+"/")) {
+			pkg = targetPath + strings.TrimPrefix(pkg, modulePath)
+		}
+		out = append(out, pkg)
+	}
+	return out
+}
+
+// checkGoVersion compares module directives with the newest stable Go release.
 func (s *Scanner) checkGoVersion(ctx context.Context, deps *dependency.Result, report *model.Report, opts Options) error {
 	if opts.NoGoVersion {
 		return nil
@@ -256,6 +404,7 @@ func (s *Scanner) checkGoVersion(ctx context.Context, deps *dependency.Result, r
 	return nil
 }
 
+// enrichDependencyHealth evaluates version freshness, retractions, and repository maintenance.
 func (s *Scanner) enrichDependencyHealth(ctx context.Context, deps *dependency.Result, report *model.Report, opts Options) error {
 	if opts.NoHealth {
 		return nil
@@ -269,6 +418,9 @@ func (s *Scanner) enrichDependencyHealth(ctx context.Context, deps *dependency.R
 	latest := map[string]string{}
 	var latestMu sync.Mutex
 	var warningMu sync.Mutex
+	var latestErr error
+	// Resolve independent modules concurrently while bounding subprocess and
+	// network pressure for large build lists.
 	sem := make(chan struct{}, 8)
 	var wg sync.WaitGroup
 	for _, module := range report.Dependencies {
@@ -285,6 +437,9 @@ func (s *Scanner) enrichDependencyHealth(ctx context.Context, deps *dependency.R
 			if err != nil {
 				warningMu.Lock()
 				report.Warnings = append(report.Warnings, err.Error())
+				if opts.RequireLatestVersions && (!deps.PackageAnalysis || module.PackagesLoaded) && latestErr == nil {
+					latestErr = err
+				}
 				warningMu.Unlock()
 				return
 			}
@@ -296,6 +451,14 @@ func (s *Scanner) enrichDependencyHealth(ctx context.Context, deps *dependency.R
 		}()
 	}
 	wg.Wait()
+	if opts.RequireLatestVersions {
+		if s.Versions == nil && len(report.Dependencies) > 0 {
+			return fmt.Errorf("latest dependency versions are required but no version resolver is configured")
+		}
+		if latestErr != nil {
+			return fmt.Errorf("resolve latest dependency versions: %w", latestErr)
+		}
+	}
 
 	modulePaths := make([]string, 0, len(report.Dependencies))
 	for _, module := range report.Dependencies {
@@ -322,10 +485,12 @@ func (s *Scanner) enrichDependencyHealth(ctx context.Context, deps *dependency.R
 			paths = deps.Graph.PathsTo(module.Path, 3)
 		}
 		health := model.DependencyHealth{
-			Module:     model.ModuleRef{Path: module.Path, Version: module.Version},
-			Kind:       module.Kind,
-			Paths:      paths,
-			Deprecated: module.Deprecated,
+			Module:         model.ModuleRef{Path: module.Path, Version: module.Version},
+			Kind:           module.Kind,
+			PackagesLoaded: module.PackagesLoaded,
+			Paths:          paths,
+			Deprecated:     module.Deprecated,
+			Retracted:      append([]string(nil), module.Retracted...),
 		}
 		if latestVersion := latest[path]; latestVersion != "" {
 			health.LatestVersion = latestVersion
@@ -345,6 +510,9 @@ func (s *Scanner) enrichDependencyHealth(ctx context.Context, deps *dependency.R
 		if health.Deprecated != "" {
 			report.Summary.Deprecated++
 		}
+		if len(health.Retracted) > 0 {
+			report.Summary.Retracted++
+		}
 		if health.Outdated {
 			report.Summary.OutdatedDependencies++
 		}
@@ -357,7 +525,7 @@ func (s *Scanner) enrichDependencyHealth(ctx context.Context, deps *dependency.R
 		if health.Unmaintained {
 			report.Summary.Unmaintained++
 		}
-		if health.Deprecated != "" || health.Outdated || health.Archived || health.Stale || health.Unmaintained {
+		if health.Deprecated != "" || len(health.Retracted) > 0 || health.Outdated || health.Archived || health.Stale || health.Unmaintained {
 			report.Health = append(report.Health, health)
 		}
 	}
@@ -382,28 +550,56 @@ func HealthExceeds(report *model.Report, requireCurrentGo, requireMaintained boo
 	return false
 }
 
-func applyIgnores(report *model.Report, rules map[string]string) {
+// applyIgnores moves findings covered by active exception rules into the ignored set.
+func applyIgnores(report *model.Report, rules map[string]model.IgnoreRule) {
 	if len(rules) == 0 || len(report.Findings) == 0 {
 		return
 	}
 
 	active := make([]model.Finding, 0, len(report.Findings))
 	for _, finding := range report.Findings {
-		rule, reason, ok := matchingIgnoreRule(finding, rules)
+		ruleKey, rule, ok := matchingIgnoreRule(finding, rules)
 		if !ok {
 			active = append(active, finding)
 			continue
 		}
+		if rule.Expires != "" {
+			// Invalid or expired exceptions fail open: the vulnerability stays active.
+			expires, err := time.Parse("2006-01-02", rule.Expires)
+			if err != nil {
+				finding.IgnoreRule = ruleKey
+				finding.IgnoreReason = rule.Reason
+				finding.IgnoreOwner = rule.Owner
+				finding.IgnoreExpires = rule.Expires
+				finding.IgnoreExpired = true
+				report.Warnings = append(report.Warnings, fmt.Sprintf("ignore rule %s has invalid expiration %q", ruleKey, rule.Expires))
+				active = append(active, finding)
+				continue
+			}
+			if !report.ScannedAt.Before(expires.Add(24 * time.Hour)) {
+				finding.IgnoreRule = ruleKey
+				finding.IgnoreReason = rule.Reason
+				finding.IgnoreOwner = rule.Owner
+				finding.IgnoreExpires = rule.Expires
+				finding.IgnoreExpired = true
+				report.Warnings = append(report.Warnings, fmt.Sprintf("ignore rule %s expired on %s", ruleKey, rule.Expires))
+				active = append(active, finding)
+				continue
+			}
+		}
 		finding.Ignored = true
-		finding.IgnoreRule = rule
-		finding.IgnoreReason = reason
+		finding.IgnoreRule = ruleKey
+		finding.IgnoreReason = rule.Reason
+		finding.IgnoreOwner = rule.Owner
+		finding.IgnoreExpires = rule.Expires
 		report.IgnoredFindings = append(report.IgnoredFindings, finding)
 		report.Summary.Ignored++
 	}
 	report.Findings = active
 }
 
-func matchingIgnoreRule(finding model.Finding, rules map[string]string) (string, string, bool) {
+// matchingIgnoreRule finds the most specific exception matching a finding or alias.
+func matchingIgnoreRule(finding model.Finding, rules map[string]model.IgnoreRule) (string, model.IgnoreRule, bool) {
 	identifiers := map[string]struct{}{}
 	for _, id := range append(append([]string{finding.Vulnerability.ID}, finding.Vulnerability.Aliases...), finding.Vulnerability.CVEs...) {
 		if id = strings.TrimSpace(id); id != "" {
@@ -441,9 +637,10 @@ func matchingIgnoreRule(finding model.Finding, rules map[string]string) (string,
 			return key, rules[key], true
 		}
 	}
-	return "", "", false
+	return "", model.IgnoreRule{}, false
 }
 
+// splitIgnoreRule separates an optional module scope from an advisory identifier.
 func splitIgnoreRule(rule string) (module, id string) {
 	rule = strings.TrimSpace(rule)
 	if at := strings.LastIndex(rule, "@"); at > 0 && at < len(rule)-1 {
@@ -452,6 +649,7 @@ func splitIgnoreRule(rule string) (module, id string) {
 	return "", rule
 }
 
+// sortFindings orders findings by severity, module path, and advisory ID.
 func sortFindings(findings []model.Finding) {
 	sort.SliceStable(findings, func(i, j int) bool {
 		a, b := findings[i], findings[j]
@@ -465,6 +663,7 @@ func sortFindings(findings []model.Finding) {
 	})
 }
 
+// enrichGitHub merges reviewed GitHub advisory metadata into active findings.
 func (s *Scanner) enrichGitHub(ctx context.Context, report *model.Report, opts Options) error {
 	if opts.NoGitHub || s.GitHub == nil || len(report.Findings) == 0 {
 		return nil
@@ -511,6 +710,7 @@ func (s *Scanner) enrichGitHub(ctx context.Context, report *model.Report, opts O
 	return nil
 }
 
+// enrichNVD merges CVSS, CWE, reference, and known-exploitation metadata.
 func (s *Scanner) enrichNVD(ctx context.Context, report *model.Report, opts Options) error {
 	if opts.NoNVD || s.NVD == nil || len(report.Findings) == 0 {
 		return nil
@@ -543,6 +743,7 @@ func (s *Scanner) enrichNVD(ctx context.Context, report *model.Report, opts Opti
 	return nil
 }
 
+// enrichEPSS attaches the highest available exploit-probability score to each finding.
 func (s *Scanner) enrichEPSS(ctx context.Context, report *model.Report, opts Options) error {
 	if opts.NoEPSS || s.EPSS == nil || len(report.Findings) == 0 {
 		return nil
@@ -571,6 +772,7 @@ func (s *Scanner) enrichEPSS(ctx context.Context, report *model.Report, opts Opt
 	return nil
 }
 
+// githubLookupID chooses the best GHSA or CVE identifier for GitHub enrichment.
 func githubLookupID(v model.Vulnerability) string {
 	for _, id := range append([]string{v.ID}, v.Aliases...) {
 		if strings.HasPrefix(id, "GHSA-") {
@@ -585,6 +787,7 @@ func githubLookupID(v model.Vulnerability) string {
 	return ""
 }
 
+// mergeRisk retains the strongest CVSS-backed or categorical risk information.
 func mergeRisk(v *model.Vulnerability, candidate *model.CVSS, severity model.Severity) {
 	if candidate != nil && (v.CVSS == nil || candidate.Score > v.CVSS.Score) {
 		copy := *candidate
@@ -597,6 +800,7 @@ func mergeRisk(v *model.Vulnerability, candidate *model.CVSS, severity model.Sev
 	}
 }
 
+// severityFromScore maps a CVSS base score to normalized severity.
 func severityFromScore(score float64) model.Severity {
 	switch {
 	case score >= 9:
@@ -612,15 +816,15 @@ func severityFromScore(score float64) model.Severity {
 	}
 }
 
+// appendSource adds a provenance source only once.
 func appendSource(in []model.AdvisorySource, source model.AdvisorySource) []model.AdvisorySource {
-	for _, existing := range in {
-		if existing == source {
-			return in
-		}
+	if slices.Contains(in, source) {
+		return in
 	}
 	return append(in, source)
 }
 
+// appendIdentifier adds a non-empty alias distinct from the primary identifier.
 func appendIdentifier(in []string, primary, id string) []string {
 	if id == "" || id == primary {
 		return in
@@ -628,6 +832,7 @@ func appendIdentifier(in []string, primary, id string) []string {
 	return appendUnique(in, id)
 }
 
+// appendUniqueAll merges values into a sorted duplicate-free slice.
 func appendUniqueAll(in []string, values []string) []string {
 	for _, value := range values {
 		in = appendUnique(in, value)
@@ -636,18 +841,18 @@ func appendUniqueAll(in []string, values []string) []string {
 	return in
 }
 
+// appendUnique adds a non-empty string only when it is absent.
 func appendUnique(in []string, value string) []string {
 	if value == "" {
 		return in
 	}
-	for _, existing := range in {
-		if existing == value {
-			return in
-		}
+	if slices.Contains(in, value) {
+		return in
 	}
 	return append(in, value)
 }
 
+// now returns the injected clock value or the current system time.
 func (s *Scanner) now() time.Time {
 	if s.Now != nil {
 		return s.Now()
@@ -686,6 +891,7 @@ func ParseSeverity(v string) (model.Severity, error) {
 	}
 }
 
+// uniqueSorted removes empty and duplicate strings and sorts the result.
 func uniqueSorted(in []string) []string {
 	m := map[string]struct{}{}
 	for _, v := range in {

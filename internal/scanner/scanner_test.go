@@ -14,14 +14,19 @@ import (
 	"github.com/therxwold/GoSCAn/internal/model"
 	"github.com/therxwold/GoSCAn/internal/nvd"
 	"github.com/therxwold/GoSCAn/internal/osv"
+	"github.com/therxwold/GoSCAn/internal/reachability"
 )
 
+// fakeDeps returns a prebuilt dependency inventory.
 type fakeDeps struct{ result *dependency.Result }
 
+// Load implements dependencyLoader for scanner tests.
 func (f fakeDeps) Load(context.Context, string) (*dependency.Result, error) { return f.result, nil }
 
+// fakeVulns reports one deterministic vulnerability for example.com/deep.
 type fakeVulns struct{}
 
+// Query implements vulnSource for scanner tests.
 func (fakeVulns) Query(_ context.Context, targets []osv.Target) (map[string][]model.Vulnerability, error) {
 	out := map[string][]model.Vulnerability{}
 	for _, t := range targets {
@@ -32,16 +37,167 @@ func (fakeVulns) Query(_ context.Context, targets []osv.Target) (map[string][]mo
 	return out, nil
 }
 
+// capturingVulns records OSV targets supplied by the scanner.
+type capturingVulns struct{ targets []osv.Target }
+
+// Query captures targets without returning vulnerabilities.
+func (f *capturingVulns) Query(_ context.Context, targets []osv.Target) (map[string][]model.Vulnerability, error) {
+	f.targets = append([]osv.Target(nil), targets...)
+	return map[string][]model.Vulnerability{}, nil
+}
+
+// packageScopedVulns reports an advisory affecting only a test helper package.
+type packageScopedVulns struct{}
+
+// Query returns package-specific vulnerability metadata.
+func (packageScopedVulns) Query(_ context.Context, targets []osv.Target) (map[string][]model.Vulnerability, error) {
+	out := map[string][]model.Vulnerability{}
+	for _, target := range targets {
+		out[target.Key] = []model.Vulnerability{{
+			ID: "GO-TEST", Severity: model.SeverityMedium,
+			AffectedImports: []model.AffectedImport{{Path: "example.com/lib/testhelper", Symbols: []string{"Unsafe"}}},
+		}}
+	}
+	return out, nil
+}
+
+// TestFindingScopeUsesAffectedPackageNotWholeModule verifies finding-level test scope.
+func TestFindingScopeUsesAffectedPackageNotWholeModule(t *testing.T) {
+	graph := dependency.NewGraph(map[string]string{"example.com/app": "", "example.com/lib": "v1.0.0"})
+	graph.AddRoot("example.com/app")
+	s := &Scanner{
+		Dependencies: fakeDeps{&dependency.Result{
+			Root: "/x", MainModule: "example.com/app", Graph: graph, PackageAnalysis: true,
+			Packages:        map[string][]string{"example.com/lib": {"example.com/lib/runtime", "example.com/lib/testhelper"}},
+			RuntimePackages: map[string][]string{"example.com/lib": {"example.com/lib/runtime"}},
+			TestPackages:    map[string][]string{"example.com/lib": {"example.com/lib/runtime", "example.com/lib/testhelper"}},
+			Modules: []model.Module{
+				{Path: "example.com/app", Main: true, Kind: model.DependencyMain},
+				{Path: "example.com/lib", Version: "v1.0.0", Kind: model.DependencyDirect, Scope: model.ScopeRuntime, PackagesLoaded: true},
+			},
+		}},
+		Vulnerabilities: packageScopedVulns{},
+	}
+	report, err := s.Scan(context.Background(), ".", Options{NoHealth: true, NoGoVersion: true, NoGitHub: true, NoNVD: true, NoEPSS: true, NoReachability: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Findings) != 1 || report.Findings[0].Module.Scope != model.ScopeTestOnly {
+		t.Fatalf("findings=%+v", report.Findings)
+	}
+}
+
+// fakeReachability returns prebuilt govulncheck evidence.
+type fakeReachability map[string]reachability.Evidence
+
+// Analyze implements reachabilitySource for scanner tests.
+func (f fakeReachability) Analyze(context.Context, string) (map[string]reachability.Evidence, error) {
+	return f, nil
+}
+
+// TestScanAddsCalledSymbolEvidence verifies call-path enrichment.
+func TestScanAddsCalledSymbolEvidence(t *testing.T) {
+	graph := dependency.NewGraph(map[string]string{"example.com/app": "", "example.com/deep": "v1.2.0"})
+	graph.AddRoot("example.com/app")
+	s := &Scanner{
+		Dependencies: fakeDeps{&dependency.Result{Root: "/x", MainModule: "example.com/app", Graph: graph, Modules: []model.Module{
+			{Path: "example.com/app", Main: true, Kind: model.DependencyMain},
+			{Path: "example.com/deep", Version: "v1.2.0", Kind: model.DependencyDirect, Scope: model.ScopeRuntime, PackagesLoaded: true},
+		}}},
+		Vulnerabilities: fakeVulns{},
+		Reachability: fakeReachability{"GO-2026-1": {Level: model.ReachabilityCalled, CallStacks: [][]model.CallFrame{{
+			{Package: "example.com/app", Function: "main"}, {Package: "example.com/deep", Function: "Vulnerable"},
+		}}}},
+	}
+	report, err := s.Scan(context.Background(), ".", Options{NoHealth: true, NoGoVersion: true, NoGitHub: true, NoNVD: true, NoEPSS: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Findings) != 1 || report.Findings[0].Reachability != model.ReachabilityCalled || len(report.Findings[0].CallStacks) != 1 {
+		t.Fatalf("findings=%+v", report.Findings)
+	}
+}
+
+// TestExpiredIgnoreRuleDoesNotSuppressFinding verifies fail-open exception expiration.
+func TestExpiredIgnoreRuleDoesNotSuppressFinding(t *testing.T) {
+	report := &model.Report{ScannedAt: time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC), Findings: []model.Finding{{
+		Module: model.Module{Path: "example.com/deep", Version: "v1.0.0"}, Vulnerability: model.Vulnerability{ID: "GO-1"},
+	}}}
+	applyIgnores(report, map[string]model.IgnoreRule{"GO-1": {Reason: "temporary", Owner: "security", Expires: "2026-08-22"}})
+	if len(report.Findings) != 1 || len(report.IgnoredFindings) != 0 || !report.Findings[0].IgnoreExpired || len(report.Warnings) != 1 {
+		t.Fatalf("report=%+v", report)
+	}
+}
+
+// TestScanPassesLoadedPackagesToOSV verifies package-aware OSV targets.
+func TestScanPassesLoadedPackagesToOSV(t *testing.T) {
+	graph := dependency.NewGraph(map[string]string{"example.com/app": "", "example.com/lib": "v1.0.0"})
+	graph.AddRoot("example.com/app")
+	vulns := &capturingVulns{}
+	s := &Scanner{
+		Dependencies: fakeDeps{&dependency.Result{
+			Root: "/x", MainModule: "example.com/app", Graph: graph, PackageAnalysis: true,
+			Packages: map[string][]string{"example.com/lib": {"example.com/lib/pkg"}},
+			Modules: []model.Module{
+				{Path: "example.com/app", Main: true, Kind: model.DependencyMain},
+				{Path: "example.com/lib", Version: "v1.0.0", Kind: model.DependencyDirect, PackagesLoaded: true},
+			},
+		}},
+		Vulnerabilities: vulns,
+		Now:             func() time.Time { return time.Unix(0, 0) },
+	}
+	if _, err := s.Scan(context.Background(), ".", Options{NoHealth: true, NoGoVersion: true}); err != nil {
+		t.Fatal(err)
+	}
+	if len(vulns.targets) != 1 || !vulns.targets[0].PackagesKnown || len(vulns.targets[0].Packages) != 1 || vulns.targets[0].Packages[0] != "example.com/lib/pkg" {
+		t.Fatalf("targets=%+v", vulns.targets)
+	}
+}
+
+// fakeEPSS returns one deterministic exploitation score.
 type fakeEPSS struct{}
 
+// Query implements epssSource for scanner tests.
 func (fakeEPSS) Query(context.Context, []string) (map[string]model.EPSS, error) {
 	return map[string]model.EPSS{"CVE-2026-1": {Score: .7, Percentile: .98}}, nil
 }
 
+// fakeLatest returns one deterministic latest module version.
 type fakeLatest struct{}
 
+// Latest implements latestResolver for scanner tests.
 func (fakeLatest) Latest(context.Context, string, string) (string, error) { return "v1.9.0", nil }
 
+// failingLatest simulates an unavailable module version service.
+type failingLatest struct{}
+
+// Latest returns a deterministic resolution failure.
+func (failingLatest) Latest(context.Context, string, string) (string, error) {
+	return "", errors.New("version service unavailable")
+}
+
+// TestScanCanRequireLatestVersionResolution verifies fail-closed latest mode.
+func TestScanCanRequireLatestVersionResolution(t *testing.T) {
+	graph := dependency.NewGraph(map[string]string{"example.com/app": "", "example.com/lib": "v1.0.0"})
+	graph.AddRoot("example.com/app")
+	s := &Scanner{
+		Dependencies: fakeDeps{&dependency.Result{
+			Root: "/x", MainModule: "example.com/app", Graph: graph, PackageAnalysis: true,
+			Modules: []model.Module{
+				{Path: "example.com/app", Main: true, Kind: model.DependencyMain},
+				{Path: "example.com/lib", Version: "v1.0.0", Kind: model.DependencyDirect, PackagesLoaded: true},
+			},
+		}},
+		Vulnerabilities: fakeVulns{}, Versions: failingLatest{},
+		Now: func() time.Time { return time.Unix(0, 0) },
+	}
+	_, err := s.Scan(context.Background(), ".", Options{NoGoVersion: true, RequireLatestVersions: true})
+	if err == nil || !strings.Contains(err.Error(), "version service unavailable") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+// TestScanIncludesTransitiveAndRecommendsGoModPin verifies transitive remediation.
 func TestScanIncludesTransitiveAndRecommendsGoModPin(t *testing.T) {
 	g := dependency.NewGraph(map[string]string{"example.com/app": "", "example.com/direct": "v1.0.0", "example.com/deep": "v1.2.0"})
 	g.AddRoot("example.com/app")
@@ -90,6 +246,7 @@ func TestScanIncludesTransitiveAndRecommendsGoModPin(t *testing.T) {
 	}
 }
 
+// TestExceeds verifies severity and EPSS CI thresholds.
 func TestExceeds(t *testing.T) {
 	r := &model.Report{Findings: []model.Finding{{Vulnerability: model.Vulnerability{Severity: model.SeverityHigh, EPSS: &model.EPSS{Score: .2}}}}}
 	if !Exceeds(r, model.SeverityHigh, -1) {
@@ -103,8 +260,10 @@ func TestExceeds(t *testing.T) {
 	}
 }
 
+// fakeGitHub returns deterministic advisory enrichment.
 type fakeGitHub struct{}
 
+// Query implements githubSource for scanner tests.
 func (fakeGitHub) Query(context.Context, []string) (map[string]githubadvisory.Record, error) {
 	return map[string]githubadvisory.Record{
 		"CVE-2026-1": {
@@ -119,8 +278,10 @@ func (fakeGitHub) Query(context.Context, []string) (map[string]githubadvisory.Re
 	}, nil
 }
 
+// fakeNVD returns deterministic CVE enrichment.
 type fakeNVD struct{}
 
+// Query implements nvdSource for scanner tests.
 func (fakeNVD) Query(context.Context, []string) (map[string]nvd.Record, error) {
 	return map[string]nvd.Record{
 		"CVE-2026-1": {
@@ -134,6 +295,7 @@ func (fakeNVD) Query(context.Context, []string) (map[string]nvd.Record, error) {
 	}, nil
 }
 
+// TestScanEnrichesGitHubAndNVD verifies cross-source risk merging.
 func TestScanEnrichesGitHubAndNVD(t *testing.T) {
 	g := dependency.ParseGraph([]byte("example.com/app example.com/deep@v1.2.0\n"), map[string]string{"example.com/app": "", "example.com/deep": "v1.2.0"})
 	g.AddRoot("example.com/app")
@@ -163,18 +325,23 @@ func TestScanEnrichesGitHubAndNVD(t *testing.T) {
 	}
 }
 
+// failingGitHub simulates an unavailable GitHub enrichment source.
 type failingGitHub struct{}
 
+// Query returns a deterministic GitHub failure.
 func (failingGitHub) Query(context.Context, []string) (map[string]githubadvisory.Record, error) {
 	return nil, errors.New("github is having a day")
 }
 
+// failingNVD simulates an unavailable NVD enrichment source.
 type failingNVD struct{}
 
+// Query returns a deterministic NVD failure.
 func (failingNVD) Query(context.Context, []string) (map[string]nvd.Record, error) {
 	return nil, errors.New("nvd is also having a day")
 }
 
+// TestScanKeepsOSVFindingWhenEnrichmentFails verifies non-strict fallback behavior.
 func TestScanKeepsOSVFindingWhenEnrichmentFails(t *testing.T) {
 	g := dependency.ParseGraph([]byte("example.com/app example.com/deep@v1.2.0\n"), map[string]string{"example.com/app": "", "example.com/deep": "v1.2.0"})
 	g.AddRoot("example.com/app")
@@ -197,6 +364,7 @@ func TestScanKeepsOSVFindingWhenEnrichmentFails(t *testing.T) {
 	}
 }
 
+// TestScanIgnoresFalsePositiveByAlias verifies alias-based finding suppression.
 func TestScanIgnoresFalsePositiveByAlias(t *testing.T) {
 	g := dependency.ParseGraph([]byte("example.com/app example.com/deep@v1.2.0\n"), map[string]string{"example.com/app": "", "example.com/deep": "v1.2.0"})
 	g.AddRoot("example.com/app")
@@ -207,8 +375,8 @@ func TestScanIgnoresFalsePositiveByAlias(t *testing.T) {
 		}, Graph: g}},
 		Vulnerabilities: fakeVulns{}, Versions: fakeLatest{},
 	}
-	r, err := s.Scan(context.Background(), ".", Options{NoGitHub: true, NoNVD: true, NoEPSS: true, IgnoreRules: map[string]string{
-		"CVE-2026-1": "false positive in this application",
+	r, err := s.Scan(context.Background(), ".", Options{NoGitHub: true, NoNVD: true, NoEPSS: true, IgnoreRules: map[string]model.IgnoreRule{
+		"CVE-2026-1": {Reason: "false positive in this application"},
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -228,26 +396,30 @@ func TestScanIgnoresFalsePositiveByAlias(t *testing.T) {
 	}
 }
 
+// TestModuleScopedIgnoreDoesNotSuppressAnotherModule verifies exception scoping.
 func TestModuleScopedIgnoreDoesNotSuppressAnotherModule(t *testing.T) {
 	finding := model.Finding{
 		Module:        model.Module{Path: "example.com/deep", Version: "v1.2.0"},
 		Vulnerability: model.Vulnerability{ID: "GO-2026-1", Aliases: []string{"GHSA-test-1234-5678"}, CVEs: []string{"CVE-2026-1"}},
 	}
-	if _, _, ok := matchingIgnoreRule(finding, map[string]string{"example.com/other@CVE-2026-1": "other module only"}); ok {
+	if _, _, ok := matchingIgnoreRule(finding, map[string]model.IgnoreRule{"example.com/other@CVE-2026-1": {Reason: "other module only"}}); ok {
 		t.Fatal("module-scoped rule matched the wrong module")
 	}
-	rule, reason, ok := matchingIgnoreRule(finding, map[string]string{"example.com/deep@GHSA-test-1234-5678": "accepted false positive"})
-	if !ok || rule != "example.com/deep@GHSA-test-1234-5678" || reason != "accepted false positive" {
-		t.Fatalf("unexpected scoped match: rule=%q reason=%q ok=%v", rule, reason, ok)
+	rule, ignore, ok := matchingIgnoreRule(finding, map[string]model.IgnoreRule{"example.com/deep@GHSA-test-1234-5678": {Reason: "accepted false positive"}})
+	if !ok || rule != "example.com/deep@GHSA-test-1234-5678" || ignore.Reason != "accepted false positive" {
+		t.Fatalf("unexpected scoped match: rule=%q ignore=%#v ok=%v", rule, ignore, ok)
 	}
 }
 
+// failingEPSS simulates an unavailable exploitation-score source.
 type failingEPSS struct{}
 
+// Query returns a deterministic EPSS failure.
 func (failingEPSS) Query(context.Context, []string) (map[string]model.EPSS, error) {
 	return nil, errors.New("epss is having a day")
 }
 
+// TestStrictEnrichmentFailsClosed verifies mandatory enrichment behavior.
 func TestStrictEnrichmentFailsClosed(t *testing.T) {
 	g := dependency.ParseGraph([]byte("example.com/app example.com/deep@v1.2.0\n"), map[string]string{"example.com/app": "", "example.com/deep": "v1.2.0"})
 	g.AddRoot("example.com/app")
@@ -263,6 +435,7 @@ func TestStrictEnrichmentFailsClosed(t *testing.T) {
 	}
 }
 
+// TestRequiredEPSSFailsClosed verifies mandatory EPSS behavior.
 func TestRequiredEPSSFailsClosed(t *testing.T) {
 	g := dependency.ParseGraph([]byte("example.com/app example.com/deep@v1.2.0\n"), map[string]string{"example.com/app": "", "example.com/deep": "v1.2.0"})
 	g.AddRoot("example.com/app")
@@ -278,14 +451,18 @@ func TestRequiredEPSSFailsClosed(t *testing.T) {
 	}
 }
 
+// fakeGoRelease returns one deterministic stable Go release.
 type fakeGoRelease struct{}
 
+// Latest implements goReleaseSource for scanner tests.
 func (fakeGoRelease) Latest(context.Context) (gorelease.Release, error) {
 	return gorelease.Release{Version: "go1.26.6", LanguageVersion: "1.26"}, nil
 }
 
+// fakeRepositories returns maintenance metadata for the Martini fixture.
 type fakeRepositories struct{}
 
+// Query implements repositorySource for scanner tests.
 func (fakeRepositories) Query(context.Context, []string, time.Time) (map[string]githubrepo.Record, error) {
 	return map[string]githubrepo.Record{
 		"go-martini/martini": {
@@ -298,8 +475,10 @@ func (fakeRepositories) Query(context.Context, []string, time.Time) (map[string]
 	}, nil
 }
 
+// healthLatest returns versions for dependency health tests.
 type healthLatest struct{}
 
+// Latest implements latestResolver for the Martini fixture.
 func (healthLatest) Latest(_ context.Context, _ string, module string) (string, error) {
 	if module == "github.com/go-martini/martini" {
 		return "v0.0.0-20170121215854-22fa46961aab", nil
@@ -307,6 +486,7 @@ func (healthLatest) Latest(_ context.Context, _ string, module string) (string, 
 	return "", nil
 }
 
+// TestScanFlagsGo118AndUnmaintainedMartiniFixture verifies Go and maintenance health.
 func TestScanFlagsGo118AndUnmaintainedMartiniFixture(t *testing.T) {
 	g := dependency.ParseGraph([]byte("filemanager github.com/go-martini/martini@v0.0.0-20170121215854-22fa46961aab\n"), map[string]string{
 		"filemanager": "", "github.com/go-martini/martini": "v0.0.0-20170121215854-22fa46961aab",
@@ -315,7 +495,7 @@ func TestScanFlagsGo118AndUnmaintainedMartiniFixture(t *testing.T) {
 	s := &Scanner{
 		Dependencies: fakeDeps{&dependency.Result{Root: "/x", MainModule: "filemanager", GoDirective: "1.18", Modules: []model.Module{
 			{Path: "filemanager", Main: true, Kind: model.DependencyMain},
-			{Path: "github.com/go-martini/martini", Version: "v0.0.0-20170121215854-22fa46961aab", Kind: model.DependencyDirect, ManifestAudited: true},
+			{Path: "github.com/go-martini/martini", Version: "v0.0.0-20170121215854-22fa46961aab", Kind: model.DependencyDirect, ManifestAudited: true, Retracted: []string{"superseded release"}},
 		}, Graph: g}},
 		Vulnerabilities: fakeVulns{}, GoReleases: fakeGoRelease{}, Repositories: fakeRepositories{}, Versions: healthLatest{},
 		Now: func() time.Time { return time.Date(2026, 8, 21, 0, 0, 0, 0, time.UTC) },
@@ -327,7 +507,7 @@ func TestScanFlagsGo118AndUnmaintainedMartiniFixture(t *testing.T) {
 	if r.Go == nil || !r.Go.DirectiveOutdated || !r.Go.Unsupported || r.Go.RecommendedDirective != "1.26" {
 		t.Fatalf("go health=%+v", r.Go)
 	}
-	if r.Summary.Unmaintained != 1 || r.Summary.Stale != 1 || len(r.Health) != 1 {
+	if r.Summary.Unmaintained != 1 || r.Summary.Stale != 1 || r.Summary.Retracted != 1 || len(r.Health) != 1 {
 		t.Fatalf("health summary=%+v findings=%+v", r.Summary, r.Health)
 	}
 	if !r.Health[0].Unmaintained || r.Health[0].MaintenanceNotice != "no longer maintained" {
@@ -338,8 +518,10 @@ func TestScanFlagsGo118AndUnmaintainedMartiniFixture(t *testing.T) {
 	}
 }
 
+// transitiveHealthLatest returns versions for a transitive health fixture.
 type transitiveHealthLatest struct{}
 
+// Latest implements latestResolver for transitive health tests.
 func (transitiveHealthLatest) Latest(_ context.Context, _ string, module string) (string, error) {
 	switch module {
 	case "github.com/acme/parent":
@@ -351,8 +533,10 @@ func (transitiveHealthLatest) Latest(_ context.Context, _ string, module string)
 	}
 }
 
+// transitiveHealthRepositories validates and enriches the transitive fixture.
 type transitiveHealthRepositories struct{}
 
+// Query implements repositorySource and asserts transitive coverage.
 func (transitiveHealthRepositories) Query(_ context.Context, modules []string, _ time.Time) (map[string]githubrepo.Record, error) {
 	found := false
 	for _, module := range modules {
@@ -375,6 +559,7 @@ func (transitiveHealthRepositories) Query(_ context.Context, modules []string, _
 	}, nil
 }
 
+// TestScanChecksSelectedTransitiveDependencyHealth verifies full-build-list health checks.
 func TestScanChecksSelectedTransitiveDependencyHealth(t *testing.T) {
 	selected := map[string]string{
 		"example.com/app":            "",
@@ -419,6 +604,7 @@ func TestScanChecksSelectedTransitiveDependencyHealth(t *testing.T) {
 	}
 }
 
+// TestToolchainUpgradeRecommendation verifies existing toolchain directive upgrades.
 func TestToolchainUpgradeRecommendation(t *testing.T) {
 	s := &Scanner{GoReleases: fakeGoRelease{}}
 	report := &model.Report{}

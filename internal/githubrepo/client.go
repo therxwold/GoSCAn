@@ -30,6 +30,7 @@ type Record struct {
 	MaintenanceNotice    string    `json:"maintenance_notice,omitempty"`
 }
 
+// apiRepository models GitHub repository metadata used by health checks.
 type apiRepository struct {
 	FullName string    `json:"full_name"`
 	HTMLURL  string    `json:"html_url"`
@@ -37,6 +38,7 @@ type apiRepository struct {
 	PushedAt time.Time `json:"pushed_at"`
 }
 
+// apiReadme models the encoded README response returned by GitHub.
 type apiReadme struct {
 	Encoding string `json:"encoding"`
 	Content  string `json:"content"`
@@ -86,12 +88,15 @@ func (c Client) Query(ctx context.Context, modulePaths []string, readmeCutoff ti
 	return out, firstErr
 }
 
+// queryOne retrieves repository metadata and inspects stale repositories for maintenance notices.
 func (c Client) queryOne(ctx context.Context, hc *http.Client, base, repo string, readmeCutoff time.Time) (Record, error) {
 	var metadata apiRepository
 	if err := c.getJSON(ctx, hc, base+"/repos/"+repo, &metadata); err != nil {
 		return Record{}, fmt.Errorf("GitHub repository %s: %w", repo, err)
 	}
 	record := Record{Repository: repo, URL: metadata.HTMLURL, Archived: metadata.Archived, PushedAt: metadata.PushedAt}
+	// README inspection is reserved for stale repositories to limit API traffic
+	// and avoid interpreting ordinary prose as a maintenance signal unnecessarily.
 	if metadata.Archived || metadata.PushedAt.IsZero() || (!readmeCutoff.IsZero() && metadata.PushedAt.After(readmeCutoff)) {
 		return record, nil
 	}
@@ -115,6 +120,7 @@ func (c Client) queryOne(ctx context.Context, hc *http.Client, base, repo string
 	return record, nil
 }
 
+// getJSON decodes a successful GitHub response and rejects non-2xx statuses.
 func (c Client) getJSON(ctx context.Context, hc *http.Client, endpoint string, dst any) error {
 	status, err := c.getJSONStatus(ctx, hc, endpoint, dst)
 	if err != nil {
@@ -126,6 +132,7 @@ func (c Client) getJSON(ctx context.Context, hc *http.Client, endpoint string, d
 	return nil
 }
 
+// getJSONStatus performs one GitHub request and returns its HTTP status with decoded data.
 func (c Client) getJSONStatus(ctx context.Context, hc *http.Client, endpoint string, dst any) (int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
@@ -164,6 +171,7 @@ func RepositoryFromModule(modulePath string) (string, bool) {
 	return url.PathEscape(parts[1]) + "/" + url.PathEscape(parts[2]), true
 }
 
+// uniqueRepositories derives unique GitHub owner/repository identifiers from module paths.
 func uniqueRepositories(modulePaths []string) []string {
 	seen := map[string]bool{}
 	var out []string
@@ -178,6 +186,7 @@ func uniqueRepositories(modulePaths []string) []string {
 	return out
 }
 
+// maintenanceNotice returns the first explicit unmaintained phrase found in a README.
 func maintenanceNotice(readme string) string {
 	lower := strings.ToLower(readme)
 	phrases := []string{

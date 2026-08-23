@@ -7,6 +7,7 @@ import (
 	"testing"
 )
 
+// TestQueryByGHSA verifies direct advisory lookup and normalization.
 func TestQueryByGHSA(t *testing.T) {
 	var auth string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -43,6 +44,7 @@ func TestQueryByGHSA(t *testing.T) {
 	}
 }
 
+// TestQueryByCVEUsesReviewedGoFilter verifies filtered CVE advisory searches.
 func TestQueryByCVEUsesReviewedGoFilter(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()

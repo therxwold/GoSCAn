@@ -10,6 +10,7 @@ import (
 	"time"
 )
 
+// TestQueryDetectsExplicitUnmaintainedNotice verifies README maintenance detection.
 func TestQueryDetectsExplicitUnmaintainedNotice(t *testing.T) {
 	readme := base64.StdEncoding.EncodeToString([]byte("# Martini\n\nNOTE: The martini framework is no longer maintained."))
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -34,6 +35,7 @@ func TestQueryDetectsExplicitUnmaintainedNotice(t *testing.T) {
 	}
 }
 
+// TestRepositoryFromModule verifies GitHub repository derivation from module paths.
 func TestRepositoryFromModule(t *testing.T) {
 	repo, ok := RepositoryFromModule("github.com/foo/bar/submodule")
 	if !ok || repo != "foo/bar" {

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"strings"
 	"time"
 
@@ -58,12 +59,14 @@ func Write(w io.Writer, report *model.Report, format Format, options ...WriteOpt
 	}
 }
 
+// writeJSON encodes the complete report as indented JSON.
 func writeJSON(w io.Writer, report *model.Report) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(report)
 }
 
+// writeTerminal renders the human-readable report and optional audit sections.
 func writeTerminal(w io.Writer, r *model.Report, opts WriteOptions) error {
 	fmt.Fprintf(w, "GoSCAn %s\n\n", r.ToolVersion)
 	fmt.Fprintf(w, "Module: %s\n", r.Module)
@@ -83,6 +86,7 @@ func writeTerminal(w io.Writer, r *model.Report, opts WriteOptions) error {
 	}
 	fmt.Fprintln(w)
 	writeGoHealth(w, r.Go)
+	writeIntegrity(w, r.Integrity)
 	writeDependencyHealth(w, r)
 	if len(r.Findings) == 0 {
 		fmt.Fprintln(w, "\nNo active known vulnerabilities found.")
@@ -92,16 +96,65 @@ func writeTerminal(w io.Writer, r *model.Report, opts WriteOptions) error {
 		if opts.ShowManifests {
 			writeManifests(w, r.Dependencies)
 		}
+		writeBaseline(w, r)
+		writeUpgrade(w, r)
 		writeWarnings(w, r)
 		return nil
 	}
 	for _, f := range r.Findings {
 		v := f.Vulnerability
-		fmt.Fprintf(w, "\n%s  %s\n", strings.ToUpper(string(v.Severity)), v.ID)
+		fmt.Fprintf(w, "\n%s  %s", strings.ToUpper(string(v.Severity)), v.ID)
+		if f.BaselineStatus != "" {
+			fmt.Fprintf(w, "  [%s]", strings.ToUpper(f.BaselineStatus))
+		}
+		fmt.Fprintln(w)
 		if v.Summary != "" {
 			fmt.Fprintf(w, "  %s\n", v.Summary)
 		}
 		fmt.Fprintf(w, "  Module:   %s@%s (%s)\n", f.Module.Path, f.Module.Version, f.Module.Kind)
+		scope := f.Module.Scope
+		if scope == "" && r.PackageAnalysis && !f.Module.PackagesLoaded {
+			scope = model.ScopeGraphOnly
+		}
+		if scope != "" {
+			fmt.Fprintf(w, "  Scope:    %s\n", scope)
+		}
+		if f.Reachability != "" {
+			fmt.Fprintf(w, "  Evidence: %s\n", f.Reachability)
+		}
+		if f.IgnoreExpired {
+			fmt.Fprintf(w, "  Exception: expired %s", f.IgnoreExpires)
+			if f.IgnoreOwner != "" {
+				fmt.Fprintf(w, " (owner: %s)", f.IgnoreOwner)
+			}
+			fmt.Fprintln(w)
+		}
+		if len(f.Vulnerability.AffectedImports) > 0 {
+			for _, imported := range f.Vulnerability.AffectedImports {
+				fmt.Fprintf(w, "  Affected: %s", imported.Path)
+				if len(imported.Symbols) > 0 {
+					fmt.Fprintf(w, " (%s)", strings.Join(imported.Symbols, ", "))
+				}
+				fmt.Fprintln(w)
+			}
+		}
+		if len(f.CallStacks) > 0 {
+			fmt.Fprintln(w, "  Call path:")
+			for i, frame := range f.CallStacks[0] {
+				prefix := "    "
+				if i > 0 {
+					prefix += "└── "
+				}
+				label := frame.Package
+				if frame.Function != "" {
+					label += "." + frame.Function
+				}
+				if frame.File != "" {
+					label += fmt.Sprintf(" (%s:%d)", frame.File, frame.Line)
+				}
+				fmt.Fprintln(w, prefix+label)
+			}
+		}
 		if f.Module.Replace != nil {
 			fmt.Fprintf(w, "  Replace:  %s@%s\n", f.Module.Replace.Path, f.Module.Replace.Version)
 		}
@@ -155,10 +208,14 @@ func writeTerminal(w io.Writer, r *model.Report, opts WriteOptions) error {
 				fmt.Fprintln(w, prefix+label)
 			}
 		}
-		if origins := requirementOrigins(r.Dependencies, f.Module.Path); len(origins) > 0 {
+		if origins := requirementOrigins(r, f.Module.Path); len(origins) > 0 {
 			fmt.Fprintln(w, "  Declared by:")
 			for _, origin := range origins {
-				fmt.Fprintf(w, "    %s@%s requires %s@%s", origin.parent.Path, origin.parent.Version, f.Module.Path, origin.requirement.Version)
+				fmt.Fprintf(w, "    %s", origin.parent.Path)
+				if origin.parent.Version != "" {
+					fmt.Fprintf(w, "@%s", origin.parent.Version)
+				}
+				fmt.Fprintf(w, " requires %s@%s", f.Module.Path, origin.requirement.Version)
 				if origin.requirement.SelectedVersion != "" && origin.requirement.SelectedVersion != origin.requirement.Version {
 					fmt.Fprintf(w, " (selected %s)", origin.requirement.SelectedVersion)
 				}
@@ -179,18 +236,68 @@ func writeTerminal(w io.Writer, r *model.Report, opts WriteOptions) error {
 	if opts.ShowManifests {
 		writeManifests(w, r.Dependencies)
 	}
+	writeBaseline(w, r)
+	writeUpgrade(w, r)
 	writeWarnings(w, r)
 	return nil
 }
 
+// writeBaseline renders baseline counts and resolved findings.
+func writeBaseline(w io.Writer, report *model.Report) {
+	if report.Summary.BaselineNew == 0 && report.Summary.BaselineUnchanged == 0 && report.Summary.BaselineRegressed == 0 && report.Summary.BaselineResolved == 0 {
+		return
+	}
+	fmt.Fprintf(w, "\nBaseline: %d new, %d unchanged, %d regressed, %d resolved\n", report.Summary.BaselineNew, report.Summary.BaselineUnchanged, report.Summary.BaselineRegressed, report.Summary.BaselineResolved)
+	for _, finding := range report.ResolvedFindings {
+		fmt.Fprintf(w, "  RESOLVED  %s in %s@%s\n", finding.ID, finding.Module.Path, finding.Module.Version)
+	}
+}
+
+// writeUpgrade renders latest-upgrade previews and applied before/after results.
+func writeUpgrade(w io.Writer, report *model.Report) {
+	if len(report.UpgradePlan) > 0 {
+		fmt.Fprintln(w, "\nLatest upgrade plan:")
+		for _, change := range report.UpgradePlan {
+			writeUpgradeChange(w, change)
+		}
+	}
+	if report.UpgradeResult == nil {
+		return
+	}
+	fmt.Fprintln(w, "\nApplied upgrade result:")
+	for _, change := range report.UpgradeResult.Changes {
+		writeUpgradeChange(w, change)
+	}
+	fmt.Fprintf(w, "  vulnerabilities: %d resolved, %d introduced\n", len(report.UpgradeResult.ResolvedFindings), len(report.UpgradeResult.NewFindings))
+}
+
+// writeUpgradeChange renders an added, removed, or updated component version.
+func writeUpgradeChange(w io.Writer, change model.UpgradeChange) {
+	from, to := change.From, change.To
+	if from == "" {
+		from = "(added)"
+	}
+	if to == "" {
+		to = "(removed)"
+	}
+	fmt.Fprintf(w, "  %s: %s -> %s\n", change.Component, from, to)
+}
+
+// requirementOrigin links a selected module requirement to the manifest declaring it.
 type requirementOrigin struct {
 	parent      model.ModuleRef
 	requirement model.ModuleRequirement
 }
 
-func requirementOrigins(modules []model.Module, target string) []requirementOrigin {
+// requirementOrigins finds every inspected manifest that declares target.
+func requirementOrigins(report *model.Report, target string) []requirementOrigin {
 	var out []requirementOrigin
-	for _, module := range modules {
+	for _, requirement := range report.MainRequirements {
+		if requirement.Path == target {
+			out = append(out, requirementOrigin{parent: model.ModuleRef{Path: report.Module}, requirement: requirement})
+		}
+	}
+	for _, module := range report.Dependencies {
 		for _, requirement := range module.Requires {
 			if requirement.Path != target {
 				continue
@@ -204,6 +311,7 @@ func requirementOrigins(modules []model.Module, target string) []requirementOrig
 	return out
 }
 
+// writeManifests renders selected dependency manifest requirements.
 func writeManifests(w io.Writer, modules []model.Module) {
 	if len(modules) == 0 {
 		return
@@ -242,6 +350,7 @@ func writeManifests(w io.Writer, modules []model.Module) {
 	}
 }
 
+// writeGoHealth renders Go directive and toolchain freshness information.
 func writeGoHealth(w io.Writer, health *model.GoHealth) {
 	if health == nil {
 		return
@@ -252,7 +361,7 @@ func writeGoHealth(w io.Writer, health *model.GoHealth) {
 	} else if health.DirectiveOutdated {
 		status := "outdated"
 		if health.Unsupported {
-			status = "unsupported"
+			status = "directive predates supported release lines"
 		}
 		fmt.Fprintf(w, "  go:        %s -> %s (%s; latest stable %s)\n", health.Directive, health.RecommendedDirective, status, health.Latest)
 	} else {
@@ -270,12 +379,32 @@ func writeGoHealth(w io.Writer, health *model.GoHealth) {
 	}
 }
 
+// writeIntegrity renders module checksum and cache verification status.
+func writeIntegrity(w io.Writer, integrity *model.Integrity) {
+	if integrity == nil {
+		return
+	}
+	fmt.Fprintln(w, "\nModule integrity:")
+	switch {
+	case integrity.Error != "":
+		fmt.Fprintf(w, "  FAILED: %s\n", integrity.Error)
+	case integrity.Verified:
+		fmt.Fprintln(w, "  verified by go mod verify")
+	default:
+		fmt.Fprintln(w, "  not verified")
+	}
+	if integrity.MissingGoSum {
+		fmt.Fprintln(w, "  warning: go.sum is missing despite selected dependencies")
+	}
+}
+
+// writeDependencyHealth renders maintenance, retraction, and version findings.
 func writeDependencyHealth(w io.Writer, r *model.Report) {
 	if len(r.Health) == 0 {
 		return
 	}
-	fmt.Fprintf(w, "\nDependency health: %d unmaintained, %d archived, %d stale, %d deprecated, %d outdated\n",
-		r.Summary.Unmaintained, r.Summary.Archived, r.Summary.Stale, r.Summary.Deprecated, r.Summary.OutdatedDependencies)
+	fmt.Fprintf(w, "\nDependency health: %d unmaintained, %d archived, %d stale, %d deprecated, %d retracted, %d outdated\n",
+		r.Summary.Unmaintained, r.Summary.Archived, r.Summary.Stale, r.Summary.Deprecated, r.Summary.Retracted, r.Summary.OutdatedDependencies)
 	for _, health := range r.Health {
 		labels := make([]string, 0, 5)
 		if health.Unmaintained {
@@ -287,6 +416,9 @@ func writeDependencyHealth(w io.Writer, r *model.Report) {
 		if health.Deprecated != "" {
 			labels = append(labels, "DEPRECATED")
 		}
+		if len(health.Retracted) > 0 {
+			labels = append(labels, "RETRACTED")
+		}
 		if health.Stale {
 			labels = append(labels, "STALE")
 		}
@@ -295,7 +427,24 @@ func writeDependencyHealth(w io.Writer, r *model.Report) {
 		}
 		fmt.Fprintf(w, "  %s  %s@%s", strings.Join(labels, "/"), health.Module.Path, health.Module.Version)
 		if health.Kind != "" {
-			fmt.Fprintf(w, " (%s)", health.Kind)
+			kind := string(health.Kind)
+			scope := model.DependencyScope("")
+			for _, module := range r.Dependencies {
+				if module.Path == health.Module.Path {
+					scope = module.Scope
+					if scope == "" && r.PackageAnalysis && !module.PackagesLoaded {
+						scope = model.ScopeGraphOnly
+					}
+					break
+				}
+			}
+			if scope == "" && r.PackageAnalysis && !health.PackagesLoaded {
+				scope = model.ScopeGraphOnly
+			}
+			if scope != "" {
+				kind += ", " + string(scope)
+			}
+			fmt.Fprintf(w, " (%s)", kind)
 		}
 		fmt.Fprintln(w)
 		if health.LatestVersion != "" && health.Outdated {
@@ -309,6 +458,9 @@ func writeDependencyHealth(w io.Writer, r *model.Report) {
 		}
 		if health.MaintenanceNotice != "" {
 			fmt.Fprintf(w, "    Notice: repository explicitly says %q\n", health.MaintenanceNotice)
+		}
+		for _, reason := range health.Retracted {
+			fmt.Fprintf(w, "    Retraction: %s\n", reason)
 		}
 		if len(health.Paths) > 0 {
 			fmt.Fprintln(w, "    Path:")
@@ -330,6 +482,7 @@ func writeDependencyHealth(w io.Writer, r *model.Report) {
 	}
 }
 
+// writeIgnored renders suppressed findings with their exception audit metadata.
 func writeIgnored(w io.Writer, findings []model.Finding) {
 	if len(findings) == 0 {
 		return
@@ -339,9 +492,16 @@ func writeIgnored(w io.Writer, findings []model.Finding) {
 		fmt.Fprintf(w, "  %s  %s@%s\n", f.Vulnerability.ID, f.Module.Path, f.Module.Version)
 		fmt.Fprintf(w, "    Rule:   %s\n", f.IgnoreRule)
 		fmt.Fprintf(w, "    Reason: %s\n", f.IgnoreReason)
+		if f.IgnoreOwner != "" {
+			fmt.Fprintf(w, "    Owner:  %s\n", f.IgnoreOwner)
+		}
+		if f.IgnoreExpires != "" {
+			fmt.Fprintf(w, "    Expires: %s\n", f.IgnoreExpires)
+		}
 	}
 }
 
+// writeWarnings renders non-fatal scan diagnostics.
 func writeWarnings(w io.Writer, r *model.Report) {
 	if len(r.Warnings) == 0 {
 		return
@@ -352,30 +512,43 @@ func writeWarnings(w io.Writer, r *model.Report) {
 	}
 }
 
+// sarifLog is the top-level SARIF 2.1.0 document.
 type sarifLog struct {
 	Version string     `json:"version"`
 	Schema  string     `json:"$schema"`
 	Runs    []sarifRun `json:"runs"`
 }
+
+// sarifRun contains one GoSCAn tool execution and its results.
 type sarifRun struct {
 	Tool    sarifTool     `json:"tool"`
 	Results []sarifResult `json:"results"`
 }
+
+// sarifTool describes the SARIF analysis tool.
 type sarifTool struct {
 	Driver sarifDriver `json:"driver"`
 }
+
+// sarifDriver contains GoSCAn identity and rule metadata.
 type sarifDriver struct {
 	Name    string      `json:"name"`
 	Version string      `json:"version"`
 	Rules   []sarifRule `json:"rules,omitempty"`
 }
+
+// sarifRule defines one advisory or health rule emitted in SARIF.
 type sarifRule struct {
 	ID               string       `json:"id"`
 	ShortDescription sarifMessage `json:"shortDescription"`
 }
+
+// sarifMessage wraps human-readable SARIF text.
 type sarifMessage struct {
 	Text string `json:"text"`
 }
+
+// sarifResult is one vulnerability, health, or integrity result.
 type sarifResult struct {
 	RuleID       string             `json:"ruleId"`
 	Level        string             `json:"level"`
@@ -385,24 +558,34 @@ type sarifResult struct {
 	Suppressions []sarifSuppression `json:"suppressions,omitempty"`
 }
 
+// sarifSuppression records an accepted external finding exception.
 type sarifSuppression struct {
 	Kind          string `json:"kind"`
 	Status        string `json:"status,omitempty"`
 	Justification string `json:"justification,omitempty"`
 }
+
+// sarifLocation identifies the physical artifact associated with a result.
 type sarifLocation struct {
 	PhysicalLocation sarifPhysicalLocation `json:"physicalLocation"`
 }
+
+// sarifPhysicalLocation wraps a SARIF artifact reference.
 type sarifPhysicalLocation struct {
 	ArtifactLocation sarifArtifactLocation `json:"artifactLocation"`
 }
+
+// sarifArtifactLocation stores the URI of the affected project artifact.
 type sarifArtifactLocation struct {
 	URI string `json:"uri"`
 }
 
+// writeSARIF converts report findings and health signals into SARIF 2.1.0.
 func writeSARIF(w io.Writer, r *model.Report, opts WriteOptions) error {
 	findings := append([]model.Finding(nil), r.Findings...)
 	if opts.ShowIgnored {
+		// SARIF suppressions must be emitted as results; ignored findings otherwise
+		// remain absent from the result stream.
 		findings = append(findings, r.IgnoredFindings...)
 	}
 
@@ -412,6 +595,21 @@ func writeSARIF(w io.Writer, r *model.Report, opts WriteOptions) error {
 		v := f.Vulnerability
 		rules[v.ID] = sarifRule{ID: v.ID, ShortDescription: sarifMessage{Text: v.Summary}}
 		props := map[string]any{"module": f.Module.Path, "version": f.Module.Version, "dependencyKind": f.Module.Kind}
+		if f.Module.Scope != "" {
+			props["scope"] = f.Module.Scope
+		}
+		if f.Reachability != "" {
+			props["reachability"] = f.Reachability
+		}
+		if len(f.CallStacks) > 0 {
+			props["callStacks"] = f.CallStacks
+		}
+		if len(v.AffectedImports) > 0 {
+			props["affectedImports"] = v.AffectedImports
+		}
+		if f.BaselineStatus != "" {
+			props["baselineStatus"] = f.BaselineStatus
+		}
 		if v.Fixed != "" {
 			props["fixedVersion"] = v.Fixed
 		}
@@ -434,6 +632,12 @@ func writeSARIF(w io.Writer, r *model.Report, opts WriteOptions) error {
 			props["ignored"] = true
 			props["ignoreRule"] = f.IgnoreRule
 			props["ignoreReason"] = f.IgnoreReason
+			if f.IgnoreOwner != "" {
+				props["ignoreOwner"] = f.IgnoreOwner
+			}
+			if f.IgnoreExpires != "" {
+				props["ignoreExpires"] = f.IgnoreExpires
+			}
 		}
 		msg := fmt.Sprintf("%s affects %s@%s", v.ID, f.Module.Path, f.Module.Version)
 		if v.Fixed != "" {
@@ -462,6 +666,8 @@ func writeSARIF(w io.Writer, r *model.Report, opts WriteOptions) error {
 		}
 	}
 	for _, health := range r.Health {
+		// Health signals use synthetic rule IDs so consumers can independently
+		// filter maintenance, version, and vulnerability results.
 		props := map[string]any{"module": health.Module.Path, "version": health.Module.Version, "kind": health.Kind}
 		if len(health.Paths) > 0 {
 			props["dependencyPaths"] = health.Paths
@@ -485,6 +691,12 @@ func writeSARIF(w io.Writer, r *model.Report, opts WriteOptions) error {
 			addSARIFHealth(&rules, &results, "GOSCAN-DEPENDENCY-DEPRECATED", "warning",
 				fmt.Sprintf("%s@%s is deprecated: %s", health.Module.Path, health.Module.Version, health.Deprecated), deprecatedProps)
 		}
+		if len(health.Retracted) > 0 {
+			retractedProps := cloneProperties(props)
+			retractedProps["retractions"] = health.Retracted
+			addSARIFHealth(&rules, &results, "GOSCAN-DEPENDENCY-RETRACTED", "warning",
+				fmt.Sprintf("%s@%s is retracted", health.Module.Path, health.Module.Version), retractedProps)
+		}
 		if health.Stale && !health.Unmaintained {
 			staleProps := cloneProperties(props)
 			if !health.LastPush.IsZero() {
@@ -500,6 +712,15 @@ func writeSARIF(w io.Writer, r *model.Report, opts WriteOptions) error {
 				fmt.Sprintf("%s@%s has newer version %s", health.Module.Path, health.Module.Version, health.LatestVersion), outdatedProps)
 		}
 	}
+	if r.Integrity != nil {
+		if r.Integrity.Error != "" {
+			addSARIFHealth(&rules, &results, "GOSCAN-MODULE-INTEGRITY", "error",
+				"go mod verify failed: "+r.Integrity.Error, map[string]any{"verified": false})
+		} else if r.Integrity.MissingGoSum {
+			addSARIFHealth(&rules, &results, "GOSCAN-MISSING-GO-SUM", "warning",
+				"go.sum is missing despite selected dependencies", map[string]any{"verified": r.Integrity.Verified})
+		}
+	}
 
 	ruleList := make([]sarifRule, 0, len(rules))
 	for _, rule := range rules {
@@ -511,6 +732,7 @@ func writeSARIF(w io.Writer, r *model.Report, opts WriteOptions) error {
 	return enc.Encode(log)
 }
 
+// addSARIFHealth registers a synthetic health rule and appends its result.
 func addSARIFHealth(rules *map[string]sarifRule, results *[]sarifResult, id, level, message string, properties map[string]any) {
 	(*rules)[id] = sarifRule{ID: id, ShortDescription: sarifMessage{Text: message}}
 	*results = append(*results, sarifResult{
@@ -522,14 +744,14 @@ func addSARIFHealth(rules *map[string]sarifRule, results *[]sarifResult, id, lev
 	})
 }
 
+// cloneProperties returns a shallow copy safe for result-specific augmentation.
 func cloneProperties(in map[string]any) map[string]any {
 	out := make(map[string]any, len(in))
-	for key, value := range in {
-		out[key] = value
-	}
+	maps.Copy(out, in)
 	return out
 }
 
+// sarifLevel maps normalized vulnerability severity to a SARIF result level.
 func sarifLevel(s model.Severity) string {
 	switch s {
 	case model.SeverityCritical, model.SeverityHigh:

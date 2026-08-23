@@ -11,12 +11,14 @@ import (
 	"github.com/therxwold/GoSCAn/internal/model"
 )
 
+// applyRunner records remediation commands and injects command failures.
 type applyRunner struct {
 	failOn string
 	calls  []string
 	mutate bool
 }
 
+// Run implements command.Runner while simulating module-file mutations.
 func (r *applyRunner) Run(_ context.Context, dir string, name string, args ...string) ([]byte, error) {
 	call := name + " " + strings.Join(args, " ")
 	r.calls = append(r.calls, call)
@@ -33,6 +35,7 @@ func (r *applyRunner) Run(_ context.Context, dir string, name string, args ...st
 	return nil, nil
 }
 
+// writeModuleFiles creates the module files used by rollback tests.
 func writeModuleFiles(t *testing.T, root string, withSum bool) (string, string) {
 	t.Helper()
 	mod := "module example.com/app\n\ngo 1.23.0\n"
@@ -48,6 +51,7 @@ func writeModuleFiles(t *testing.T, root string, withSum bool) (string, string) 
 	return mod, sum
 }
 
+// oneFix returns a representative direct dependency remediation.
 func oneFix() []model.Finding {
 	return []model.Finding{{
 		Module: model.Module{Path: "example.com/a"},
@@ -55,7 +59,7 @@ func oneFix() []model.Finding {
 	}}
 }
 
-// Rollback tests intentionally cover both existing and newly created module files.
+// TestApplySuccessRunsGetTidyAndTests verifies the complete successful command sequence.
 func TestApplySuccessRunsGetTidyAndTests(t *testing.T) {
 	root := t.TempDir()
 	writeModuleFiles(t, root, true)
@@ -74,6 +78,7 @@ func TestApplySuccessRunsGetTidyAndTests(t *testing.T) {
 	}
 }
 
+// TestApplyWithoutTestsSkipsGoTest verifies the runTests switch.
 func TestApplyWithoutTestsSkipsGoTest(t *testing.T) {
 	root := t.TempDir()
 	writeModuleFiles(t, root, false)
@@ -87,6 +92,7 @@ func TestApplyWithoutTestsSkipsGoTest(t *testing.T) {
 	}
 }
 
+// TestApplyRollsBackBothModuleFilesOnTestFailure verifies atomic rollback after failing tests.
 func TestApplyRollsBackBothModuleFilesOnTestFailure(t *testing.T) {
 	root := t.TempDir()
 	originalMod, originalSum := writeModuleFiles(t, root, true)
@@ -104,6 +110,7 @@ func TestApplyRollsBackBothModuleFilesOnTestFailure(t *testing.T) {
 	}
 }
 
+// TestApplyRemovesNewGoSumOnRollback verifies restoration when go.sum was newly created.
 func TestApplyRemovesNewGoSumOnRollback(t *testing.T) {
 	root := t.TempDir()
 	originalMod, _ := writeModuleFiles(t, root, false)
@@ -120,6 +127,7 @@ func TestApplyRemovesNewGoSumOnRollback(t *testing.T) {
 	}
 }
 
+// TestApplyRollsBackOnGoGetFailure verifies rollback after dependency upgrade failure.
 func TestApplyRollsBackOnGoGetFailure(t *testing.T) {
 	root := t.TempDir()
 	originalMod, originalSum := writeModuleFiles(t, root, true)
@@ -134,6 +142,7 @@ func TestApplyRollsBackOnGoGetFailure(t *testing.T) {
 	}
 }
 
+// TestApplyRollsBackOnTidyFailure verifies rollback after go mod tidy failure.
 func TestApplyRollsBackOnTidyFailure(t *testing.T) {
 	root := t.TempDir()
 	originalMod, originalSum := writeModuleFiles(t, root, true)
@@ -148,6 +157,7 @@ func TestApplyRollsBackOnTidyFailure(t *testing.T) {
 	}
 }
 
+// TestApplyRollsBackOnVerifyFailure verifies rollback after integrity verification failure.
 func TestApplyRollsBackOnVerifyFailure(t *testing.T) {
 	root := t.TempDir()
 	originalMod, originalSum := writeModuleFiles(t, root, true)
@@ -162,6 +172,7 @@ func TestApplyRollsBackOnVerifyFailure(t *testing.T) {
 	}
 }
 
+// TestApplyUsesHighestFixPerModule verifies deduplication of fixes for one module.
 func TestApplyUsesHighestFixPerModule(t *testing.T) {
 	root := t.TempDir()
 	writeModuleFiles(t, root, false)
@@ -179,6 +190,7 @@ func TestApplyUsesHighestFixPerModule(t *testing.T) {
 	}
 }
 
+// TestApplySkipsReplacementFixes verifies that replacement directives are not rewritten.
 func TestApplySkipsReplacementFixes(t *testing.T) {
 	root := t.TempDir()
 	writeModuleFiles(t, root, false)
@@ -192,5 +204,59 @@ func TestApplySkipsReplacementFixes(t *testing.T) {
 	}
 	if len(r.calls) != 0 {
 		t.Fatalf("calls=%v", r.calls)
+	}
+}
+
+// latestReport returns dependency and Go upgrade candidates for apply tests.
+func latestReport() *model.Report {
+	return &model.Report{
+		PackageAnalysis: true,
+		Dependencies: []model.Module{{
+			Path: "example.com/a", Version: "v1.0.0", Kind: model.DependencyDirect, PackagesLoaded: true,
+		}},
+		Health: []model.DependencyHealth{{
+			Module: model.ModuleRef{Path: "example.com/a", Version: "v1.0.0"}, Outdated: true, LatestVersion: "v1.2.3",
+		}},
+		Go: &model.GoHealth{Directive: "1.23.0", RecommendedDirective: "1.26", DirectiveOutdated: true},
+	}
+}
+
+// TestApplyLatestUpgradesDependenciesAndGoThenTestsOnce verifies latest-mode sequencing.
+func TestApplyLatestUpgradesDependenciesAndGoThenTestsOnce(t *testing.T) {
+	root := t.TempDir()
+	writeModuleFiles(t, root, true)
+	r := &applyRunner{}
+	changed, err := (Applier{Runner: r}).ApplyLatest(context.Background(), root, latestReport(), true, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("expected latest upgrades")
+	}
+	want := []string{
+		"go get example.com/a@v1.2.3",
+		"go mod tidy",
+		"go mod verify",
+		"go mod tidy",
+		"go mod verify",
+		"go test ./...",
+	}
+	if strings.Join(r.calls, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("calls=%v want=%v", r.calls, want)
+	}
+}
+
+// TestApplyLatestRollsBackEverythingOnFinalTestFailure verifies outer transaction rollback.
+func TestApplyLatestRollsBackEverythingOnFinalTestFailure(t *testing.T) {
+	root := t.TempDir()
+	originalMod, originalSum := writeModuleFiles(t, root, true)
+	r := &applyRunner{failOn: "go test ./...", mutate: true}
+	if _, err := (Applier{Runner: r}).ApplyLatest(context.Background(), root, latestReport(), true, true); err == nil {
+		t.Fatal("expected test failure")
+	}
+	gotMod, _ := os.ReadFile(filepath.Join(root, "go.mod"))
+	gotSum, _ := os.ReadFile(filepath.Join(root, "go.sum"))
+	if string(gotMod) != originalMod || string(gotSum) != originalSum {
+		t.Fatalf("latest upgrade was not rolled back: go.mod=%q go.sum=%q", gotMod, gotSum)
 	}
 }

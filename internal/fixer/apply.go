@@ -15,10 +15,61 @@ import (
 // Applier applies recommended module upgrades through the Go command and rolls back failed verification.
 type Applier struct{ Runner command.Runner }
 
+// fileBackup preserves one module file so a failed remediation can be rolled back.
 type fileBackup struct {
 	path    string
 	data    []byte
 	existed bool
+}
+
+// ApplyLatest atomically upgrades loaded dependencies and Go settings to their
+// newest resolved versions. Verification is performed by the narrower apply
+// steps, while tests run once after the complete upgrade is assembled.
+func (a Applier) ApplyLatest(ctx context.Context, root string, report *model.Report, includeVulnerabilities, runTests bool) (bool, error) {
+	if a.Runner == nil {
+		a.Runner = command.ExecRunner{}
+	}
+	backups, err := backupModuleFiles(root)
+	if err != nil {
+		return false, err
+	}
+	// ApplyLatest owns the outer transaction because its narrower Apply and
+	// ApplyGo operations verify independently before the final combined test.
+	rollback := func() {
+		for _, backup := range backups {
+			if backup.existed {
+				_ = os.WriteFile(backup.path, backup.data, 0o644)
+			} else {
+				_ = os.Remove(backup.path)
+			}
+		}
+	}
+
+	applied := false
+	recommendations := LatestRecommendations(report, includeVulnerabilities)
+	if HasApplicable(recommendations) {
+		if err := a.Apply(ctx, root, recommendations, false); err != nil {
+			rollback()
+			return false, err
+		}
+		applied = true
+	}
+	goApplied, err := a.ApplyGo(ctx, root, report.Go, true, true, false)
+	if err != nil {
+		rollback()
+		return false, err
+	}
+	applied = applied || goApplied
+	if !applied {
+		return false, nil
+	}
+	if runTests {
+		if out, err := a.Runner.Run(ctx, root, "go", "test", "./..."); err != nil {
+			rollback()
+			return false, fmt.Errorf("tests failed after latest upgrades; go.mod/go.sum restored: %w: %s", err, string(out))
+		}
+	}
+	return true, nil
 }
 
 // HasApplicable reports whether findings contain at least one automatic module fix.
@@ -41,6 +92,8 @@ func (a Applier) Apply(ctx context.Context, root string, findings []model.Findin
 		if f.Fix == nil || f.Fix.To == "" || f.Module.Replace != nil {
 			continue
 		}
+		// MVS can select only one version, so retain the highest required fix when
+		// several advisories affect the same module.
 		fixes[f.Fix.Module] = goversion.Max(fixes[f.Fix.Module], f.Fix.To)
 	}
 	if len(fixes) == 0 {
@@ -89,6 +142,7 @@ func (a Applier) Apply(ctx context.Context, root string, findings []model.Findin
 	return nil
 }
 
+// backupModuleFiles captures go.mod and go.sum, including whether each file exists.
 func backupModuleFiles(root string) ([]fileBackup, error) {
 	var out []fileBackup
 	for _, name := range []string{"go.mod", "go.sum"} {
