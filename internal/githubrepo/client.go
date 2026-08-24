@@ -3,7 +3,6 @@ package githubrepo
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/therxwold/GoSCAn/internal/httpjson"
 )
 
 // Client queries GitHub repository metadata used for dependency maintenance health checks.
@@ -156,7 +157,7 @@ func (c Client) getJSONStatus(ctx context.Context, hc *http.Client, endpoint str
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return resp.StatusCode, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
-	if err := json.NewDecoder(resp.Body).Decode(dst); err != nil {
+	if err := httpjson.Decode(resp.Body, dst); err != nil {
 		return resp.StatusCode, err
 	}
 	return resp.StatusCode, nil

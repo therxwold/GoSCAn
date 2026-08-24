@@ -16,6 +16,7 @@ import (
 
 	"github.com/therxwold/GoSCAn/internal/cvss"
 	"github.com/therxwold/GoSCAn/internal/goversion"
+	"github.com/therxwold/GoSCAn/internal/httpjson"
 	"github.com/therxwold/GoSCAn/internal/model"
 )
 
@@ -273,7 +274,7 @@ func doJSON(ctx context.Context, hc *http.Client, method, endpoint string, body 
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
 	}
-	return json.NewDecoder(resp.Body).Decode(dst)
+	return httpjson.Decode(resp.Body, dst)
 }
 
 // groupAliases joins records connected through any shared advisory identifier.

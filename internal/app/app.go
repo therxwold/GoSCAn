@@ -19,11 +19,13 @@ import (
 	"github.com/therxwold/GoSCAn/internal/model"
 	"github.com/therxwold/GoSCAn/internal/nvd"
 	"github.com/therxwold/GoSCAn/internal/output"
+	"github.com/therxwold/GoSCAn/internal/reachability"
 	"github.com/therxwold/GoSCAn/internal/scanner"
+	"github.com/therxwold/GoSCAn/internal/vulndb"
 )
 
 // Version is the current GoSCAn version.
-const Version string = "v0.4.1"
+const Version string = "v0.4.2"
 
 // Run starts GoSCAn and exits with the command result code.
 func Run() {
@@ -44,6 +46,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return runScan(args[1:], stdout, stderr)
 		case "fix":
 			return runFix(args[1:], stdout, stderr)
+		case "db":
+			return runDB(args[1:], stdout, stderr)
 		}
 	}
 
@@ -74,6 +78,7 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 	noNVD := fs.Bool("no-nvd", false, "disable NVD enrichment")
 	noEPSS := fs.Bool("no-epss", !cfg.EPSS.Enabled, "disable FIRST EPSS enrichment")
 	noReachability := fs.Bool("no-reachability", false, "disable govulncheck symbol and call-path analysis")
+	vulnerabilityDatabase := fs.String("vulndb", defaultVulnerabilityDatabase(), "govulncheck database URL or local directory")
 	showIgnored := fs.Bool("show-ignored", cfg.Ignore.Show, "show findings suppressed as false positives")
 	showManifests := fs.Bool("show-manifests", cfg.Scan.ShowManifests, "show requirements declared by selected dependency manifests")
 	strictEnrichment := fs.Bool("strict-enrichment", cfg.Scan.StrictEnrichment, "fail when an enabled enrichment source is unavailable")
@@ -164,6 +169,15 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 	s.GitHub = githubadvisory.Client{Token: cfg.GitHub.Token}
 	s.NVD = nvd.Client{APIKey: cfg.NVD.APIKey}
 	s.Repositories = githubrepo.Client{Token: cfg.GitHub.Token}
+	databaseURL := ""
+	if !*noReachability {
+		databaseURL, err = vulndb.DatabaseURL(*vulnerabilityDatabase)
+		if err != nil {
+			fmt.Fprintln(stderr, "goscan:", err)
+			return 2
+		}
+	}
+	s.Reachability = reachability.Analyzer{DatabaseURL: databaseURL}
 	report, err := s.Scan(ctx, dir, scanner.Options{
 		NoGitHub: !*githubEnabled, NoNVD: !*nvdEnabled, NoEPSS: *noEPSS,
 		StrictEnrichment: *strictEnrichment, RequireEPSS: *epssThreshold >= 0,
@@ -219,6 +233,7 @@ func runFix(args []string, stdout, stderr io.Writer) int {
 	noNVD := fs.Bool("no-nvd", false, "disable NVD enrichment")
 	noEPSS := fs.Bool("no-epss", !cfg.EPSS.Enabled, "disable FIRST EPSS enrichment")
 	noReachability := fs.Bool("no-reachability", false, "disable govulncheck symbol and call-path analysis")
+	vulnerabilityDatabase := fs.String("vulndb", defaultVulnerabilityDatabase(), "govulncheck database URL or local directory")
 	showIgnored := fs.Bool("show-ignored", cfg.Ignore.Show, "show findings suppressed as false positives")
 	showManifests := fs.Bool("show-manifests", cfg.Scan.ShowManifests, "show requirements declared by selected dependency manifests")
 	strictEnrichment := fs.Bool("strict-enrichment", cfg.Scan.StrictEnrichment, "fail when an enabled enrichment source is unavailable")
@@ -295,6 +310,15 @@ func runFix(args []string, stdout, stderr io.Writer) int {
 	s.GitHub = githubadvisory.Client{Token: cfg.GitHub.Token}
 	s.NVD = nvd.Client{APIKey: cfg.NVD.APIKey}
 	s.Repositories = githubrepo.Client{Token: cfg.GitHub.Token}
+	databaseURL := ""
+	if !*noReachability {
+		databaseURL, err = vulndb.DatabaseURL(*vulnerabilityDatabase)
+		if err != nil {
+			fmt.Fprintln(stderr, "goscan:", err)
+			return 2
+		}
+	}
+	s.Reachability = reachability.Analyzer{DatabaseURL: databaseURL}
 	opts := scanner.Options{NoGitHub: !*githubEnabled, NoNVD: !*nvdEnabled, NoEPSS: *noEPSS, StrictEnrichment: *strictEnrichment,
 		NoHealth: !*healthEnabled, NoGoVersion: !*goVersionEnabled, NoReachability: *noReachability,
 		StaleAfter: time.Duration(*staleAfterDays) * 24 * time.Hour, IgnoreRules: ignoreRules}
@@ -365,6 +389,74 @@ func runFix(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+// runDB dispatches vulnerability database management commands.
+func runDB(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 || args[0] == "help" || args[0] == "-h" || args[0] == "--help" {
+		databaseUsage(stdout)
+		return 0
+	}
+	if args[0] != "update" {
+		fmt.Fprintf(stderr, "goscan db: unknown command %q\n", args[0])
+		databaseUsage(stderr)
+		return 2
+	}
+	return runDBUpdate(args[1:], stdout, stderr)
+}
+
+// runDBUpdate downloads and installs one official-format Go vulnerability database snapshot.
+func runDBUpdate(args []string, stdout, stderr io.Writer) int {
+	defaultPath, defaultPathErr := vulndb.DefaultPath()
+	fs := flag.NewFlagSet("goscan db update", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	path := fs.String("path", defaultPath, "database installation directory")
+	source := fs.String("url", vulndb.DefaultURL, "database snapshot URL")
+	timeout := fs.Duration("timeout", 2*time.Minute, "download and installation timeout")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintln(stderr, "goscan db update does not accept positional arguments")
+		return 2
+	}
+	if *timeout <= 0 {
+		fmt.Fprintln(stderr, "--timeout must be greater than zero")
+		return 2
+	}
+	if *path == "" && defaultPathErr != nil {
+		fmt.Fprintln(stderr, "goscan db update:", defaultPathErr)
+		return 2
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+	metadata, err := (vulndb.Updater{URL: *source}).Update(ctx, *path)
+	if err != nil {
+		fmt.Fprintln(stderr, "goscan db update:", err)
+		return 2
+	}
+	fmt.Fprintln(stdout, "Go vulnerability database updated")
+	fmt.Fprintf(stdout, "Path:       %s\n", metadata.Path)
+	fmt.Fprintf(stdout, "Source:     %s\n", metadata.Source)
+	fmt.Fprintf(stdout, "Modified:   %s\n", metadata.Modified.Format(time.RFC3339))
+	fmt.Fprintf(stdout, "Advisories: %d\n", metadata.Advisories)
+	return 0
+}
+
+// defaultVulnerabilityDatabase selects an explicit environment override or an installed cache.
+func defaultVulnerabilityDatabase() string {
+	if value := strings.TrimSpace(os.Getenv("GOSCAN_VULNDB")); value != "" {
+		return value
+	}
+	path, err := vulndb.DefaultPath()
+	if err == nil && vulndb.Installed(path) {
+		return path
+	}
+	return ""
+}
+
 // loadCommandConfig resolves configuration-selection flags before command-specific flag parsing.
 func loadCommandConfig(args []string) (config.Config, string, error) {
 	if requestsHelp(args) {
@@ -433,6 +525,7 @@ func usage(w io.Writer) {
 Usage:
   goscan [scan] [flags] [path]
   goscan fix [flags] [path]
+  goscan db update [flags]
   goscan version
   goscan -v
 
@@ -456,5 +549,22 @@ Examples:
   goscan fix
   goscan fix --apply
   goscan fix --apply --latest
-  goscan fix --apply --upgrade-go --upgrade-toolchain`)
+  goscan fix --apply --upgrade-go --upgrade-toolchain
+  goscan db update`)
+}
+
+// databaseUsage writes help for local Go vulnerability database management.
+func databaseUsage(w io.Writer) {
+	fmt.Fprintln(w, `Usage:
+  goscan db update [flags]
+
+Download, validate, and atomically install the official Go vulnerability
+database snapshot. Scans automatically use the default installed snapshot for
+govulncheck reachability analysis. Set GOSCAN_VULNDB or --vulndb to select a
+different local directory or database URL.
+
+Examples:
+  goscan db update
+  goscan db update --path /var/cache/goscan/vulndb
+  goscan scan --vulndb /var/cache/goscan/vulndb`)
 }

@@ -126,7 +126,8 @@ func (s *Scanner) Scan(ctx context.Context, dir string, opts Options) (*model.Re
 		return nil, err
 	}
 	report := &model.Report{
-		Root: deps.Root, ToolVersion: s.ToolVersion, Module: deps.MainModule,
+		SchemaVersion: model.ReportSchemaVersion,
+		Root:          deps.Root, ToolVersion: s.ToolVersion, Module: deps.MainModule,
 		MainRequirements: deps.MainRequirements, PackageAnalysis: deps.PackageAnalysis,
 		ScannedAt: s.now().UTC(),
 		Integrity: &deps.Integrity,

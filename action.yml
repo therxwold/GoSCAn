@@ -75,7 +75,7 @@ inputs:
     required: false
     default: "false"
   create-pr:
-    description: Create or update a pull request with selected automatic fixes. Requires contents:write and pull-requests:write.
+    description: Create or update a pull request with selected automatic fixes when running on the default branch. Requires contents:write and pull-requests:write.
     required: false
     default: "false"
   pr-vulnerabilities:
@@ -151,6 +151,24 @@ runs:
           export GOSCAN_GITHUB_TOKEN="$GOSCAN_DEFAULT_GITHUB_TOKEN"
         fi
 
+        # These inputs are documented as repository-relative. Reject absolute
+        # paths and parent traversal before any directory or report is created.
+        validate_repo_relative() {
+          local label="$1"
+          local value="$2"
+          [[ -z "$value" ]] && return 0
+          case "$value" in
+            /*|..|../*|*/../*|*/..)
+              echo "GoSCAn $label must be relative to the repository root: $value" >&2
+              exit 2
+              ;;
+          esac
+        }
+        [[ -z "$GOSCAN_PATH" ]] && GOSCAN_PATH="."
+        validate_repo_relative path "$GOSCAN_PATH"
+        validate_repo_relative config "$GOSCAN_CONFIG"
+        validate_repo_relative output-file "$GOSCAN_OUTPUT_FILE"
+
         args=(scan --fail-on "$GOSCAN_FAIL_ON" --epss-threshold "$GOSCAN_EPSS_THRESHOLD" --format "$GOSCAN_FORMAT")
         if [[ "$GOSCAN_STRICT_ENRICHMENT" == "true" ]]; then
           args+=(--strict-enrichment)
@@ -217,13 +235,21 @@ runs:
         fi
 
     - name: Apply configured fixes and open pull request
-      if: ${{ inputs.create-pr == 'true' && github.event_name != 'pull_request' }}
+      if: ${{ inputs.create-pr == 'true' && github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch }}
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
         GOSCAN_DEFAULT_GITHUB_TOKEN: ${{ github.token }}
         GOSCAN_CONFIG: ${{ inputs.config }}
         GOSCAN_PATH: ${{ inputs.path }}
+        GOSCAN_STRICT_ENRICHMENT: ${{ inputs.strict-enrichment }}
+        GOSCAN_NO_GITHUB: ${{ inputs.no-github }}
+        GOSCAN_NO_NVD: ${{ inputs.no-nvd }}
+        GOSCAN_NO_EPSS: ${{ inputs.no-epss }}
+        GOSCAN_IGNORE: ${{ inputs.ignore }}
+        GOSCAN_NO_HEALTH: ${{ inputs.no-health }}
+        GOSCAN_NO_GO_VERSION: ${{ inputs.no-go-version }}
+        GOSCAN_STALE_AFTER_DAYS: ${{ inputs.stale-after-days }}
         GOSCAN_PR_VULNERABILITIES: ${{ inputs.pr-vulnerabilities }}
         GOSCAN_PR_GO_VERSION: ${{ inputs.pr-go-version }}
         GOSCAN_PR_TOOLCHAIN: ${{ inputs.pr-toolchain }}
@@ -244,8 +270,39 @@ runs:
         else
           args+=(--no-config)
         fi
+        if [[ "$GOSCAN_STRICT_ENRICHMENT" == "true" ]]; then
+          args+=(--strict-enrichment)
+        fi
+        if [[ "$GOSCAN_NO_GITHUB" == "true" ]]; then
+          args+=(--no-github)
+        fi
+        if [[ "$GOSCAN_NO_NVD" == "true" ]]; then
+          args+=(--no-nvd)
+        fi
+        if [[ "$GOSCAN_NO_EPSS" == "true" ]]; then
+          args+=(--no-epss)
+        fi
+        if [[ "$GOSCAN_NO_HEALTH" == "true" ]]; then
+          args+=(--no-health)
+        fi
+        if [[ "$GOSCAN_NO_GO_VERSION" == "true" ]]; then
+          args+=(--no-go-version)
+        fi
+        args+=(--stale-after-days "$GOSCAN_STALE_AFTER_DAYS")
+        if [[ -n "$GOSCAN_IGNORE" ]]; then
+          while IFS= read -r rule; do
+            [[ -n "$rule" ]] && args+=(--ignore "$rule")
+          done <<< "$GOSCAN_IGNORE"
+        fi
         args+=(-- "$GOSCAN_PATH")
+        fix_status=0
+        set +e
         "$RUNNER_TEMP/goscan" "${args[@]}"
+        fix_status=$?
+        set -e
+        if [[ "$fix_status" -ne 0 && "$fix_status" -ne 1 ]]; then
+          exit "$fix_status"
+        fi
 
         module_dir="$GOSCAN_PATH"
         [[ "$module_dir" == "." ]] && module_dir=""
@@ -287,7 +344,7 @@ runs:
         fi
 
     - name: Enforce scan result
-      if: ${{ always() && steps.scan.outputs.status != '0' }}
+      if: ${{ always() && steps.scan.outputs.status != '' && steps.scan.outputs.status != '0' }}
       shell: bash
       env:
         GOSCAN_SCAN_STATUS: ${{ steps.scan.outputs.status }}

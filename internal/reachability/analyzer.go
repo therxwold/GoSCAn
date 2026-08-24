@@ -19,12 +19,15 @@ type Evidence struct {
 }
 
 // Analyzer runs the official Go vulnerability analyzer over source and tests.
-type Analyzer struct{}
+type Analyzer struct {
+	// DatabaseURL optionally selects a file or HTTP Go vulnerability database.
+	DatabaseURL string
+}
 
 // Analyze runs govulncheck over production and test packages below root.
-func (Analyzer) Analyze(ctx context.Context, root string) (map[string]Evidence, error) {
+func (a Analyzer) Analyze(ctx context.Context, root string) (map[string]Evidence, error) {
 	var stdout, stderr bytes.Buffer
-	cmd := scan.Command(ctx, "-C", root, "-json", "-test", "./...")
+	cmd := scan.Command(ctx, commandArgs(root, a.DatabaseURL)...)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
@@ -37,6 +40,15 @@ func (Analyzer) Analyze(ctx context.Context, root string) (map[string]Evidence, 
 		}
 	}
 	return parse(bytes.NewReader(stdout.Bytes()))
+}
+
+// commandArgs constructs govulncheck arguments, including an optional alternate database.
+func commandArgs(root, databaseURL string) []string {
+	args := []string{"-C", root, "-json", "-test"}
+	if databaseURL != "" {
+		args = append(args, "-db", databaseURL)
+	}
+	return append(args, "./...")
 }
 
 // message models the finding subset of govulncheck's streaming JSON protocol.

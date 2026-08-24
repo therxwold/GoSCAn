@@ -14,6 +14,7 @@
 # Folders
 !cmd/
 !cmd/**/
+!cmd/**/*.go
 !internal/
 !internal/**/
 !internal/**/*.go

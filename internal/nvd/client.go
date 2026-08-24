@@ -2,7 +2,6 @@ package nvd
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/therxwold/GoSCAn/internal/httpjson"
 	"github.com/therxwold/GoSCAn/internal/model"
 )
 
@@ -122,7 +122,7 @@ func (c Client) Query(ctx context.Context, cves []string) (map[string]Record, er
 			return nil, fmt.Errorf("NVD query: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 		}
 		var data apiResponse
-		err = json.NewDecoder(resp.Body).Decode(&data)
+		err = httpjson.Decode(resp.Body, &data)
 		resp.Body.Close()
 		if err != nil {
 			return nil, fmt.Errorf("decode NVD response: %w", err)

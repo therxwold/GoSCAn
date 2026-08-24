@@ -2,6 +2,9 @@ package model
 
 import "time"
 
+// ReportSchemaVersion is the current JSON report contract version.
+const ReportSchemaVersion = 1
+
 // DependencyKind describes how a selected module is related to the main module.
 type DependencyKind string
 
@@ -333,6 +336,8 @@ type UpgradeSummary struct {
 
 // Report is the complete result of a GoSCAn dependency vulnerability scan.
 type Report struct {
+	// SchemaVersion identifies the JSON report contract used by this value.
+	SchemaVersion    int                 `json:"schema_version"`
 	Root             string              `json:"-"`
 	ToolVersion      string              `json:"tool_version"`
 	Module           string              `json:"module"`

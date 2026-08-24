@@ -154,6 +154,36 @@ func TestScanPassesLoadedPackagesToOSV(t *testing.T) {
 	}
 }
 
+// TestScanKeepsPackageFilteringConservativeAfterLoadFailure verifies incomplete analysis propagation.
+func TestScanKeepsPackageFilteringConservativeAfterLoadFailure(t *testing.T) {
+	graph := dependency.NewGraph(map[string]string{"example.com/app": "", "example.com/lib": "v1.0.0"})
+	graph.AddRoot("example.com/app")
+	vulns := &capturingVulns{}
+	s := &Scanner{
+		Dependencies: fakeDeps{&dependency.Result{
+			Root: "/x", MainModule: "example.com/app", Graph: graph, PackageAnalysis: false,
+			Packages: map[string][]string{"example.com/lib": {"example.com/lib/partially-loaded"}},
+			Warnings: []string{"imported package analysis incomplete: build failed"},
+			Modules: []model.Module{
+				{Path: "example.com/app", Main: true, Kind: model.DependencyMain},
+				{Path: "example.com/lib", Version: "v1.0.0", Kind: model.DependencyDirect, PackagesLoaded: true},
+			},
+		}},
+		Vulnerabilities: vulns,
+		Now:             func() time.Time { return time.Unix(0, 0) },
+	}
+	report, err := s.Scan(context.Background(), ".", Options{NoHealth: true, NoGoVersion: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(vulns.targets) != 1 || vulns.targets[0].PackagesKnown {
+		t.Fatalf("incomplete packages were treated as authoritative: %+v", vulns.targets)
+	}
+	if len(report.Warnings) != 1 || !strings.Contains(report.Warnings[0], "analysis incomplete") {
+		t.Fatalf("package-load failure was not reported: %v", report.Warnings)
+	}
+}
+
 // fakeEPSS returns one deterministic exploitation score.
 type fakeEPSS struct{}
 

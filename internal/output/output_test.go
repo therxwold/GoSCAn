@@ -110,7 +110,7 @@ func TestJSON(t *testing.T) {
 	if err := Write(&b, sampleReport(), FormatJSON); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(b.String(), `"tool_version": "0.1.0"`) {
+	if !strings.Contains(b.String(), `"schema_version": 1`) || !strings.Contains(b.String(), `"tool_version": "0.1.0"`) {
 		t.Fatal(b.String())
 	}
 }
@@ -147,8 +147,30 @@ func TestSARIF(t *testing.T) {
 	if err := Write(&b, sampleReport(), FormatSARIF); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(b.String(), `"version": "2.1.0"`) || !strings.Contains(b.String(), `"ruleId": "GO-1"`) {
+	if !strings.Contains(b.String(), `"version": "2.1.0"`) || !strings.Contains(b.String(), `"ruleId": "GO-1"`) || !strings.Contains(b.String(), `"uriBaseId": "%SRCROOT%"`) {
 		t.Fatal(b.String())
+	}
+}
+
+// TestSARIFRuleOrderingIsDeterministic verifies map iteration cannot reorder rules.
+func TestSARIFRuleOrderingIsDeterministic(t *testing.T) {
+	r := sampleReport()
+	r.Findings = append(r.Findings, model.Finding{
+		Module:        model.Module{Path: "example.com/z", Version: "v1.0.0"},
+		Vulnerability: model.Vulnerability{ID: "GO-0", Severity: model.SeverityLow},
+	})
+	var first bytes.Buffer
+	if err := Write(&first, r, FormatSARIF); err != nil {
+		t.Fatal(err)
+	}
+	for range 20 {
+		var next bytes.Buffer
+		if err := Write(&next, r, FormatSARIF); err != nil {
+			t.Fatal(err)
+		}
+		if next.String() != first.String() {
+			t.Fatal("SARIF output changed across identical writes")
+		}
 	}
 }
 

@@ -2,7 +2,6 @@ package epss
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -10,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/therxwold/GoSCAn/internal/httpjson"
 	"github.com/therxwold/GoSCAn/internal/model"
 )
 
@@ -65,7 +65,7 @@ func (c Client) Query(ctx context.Context, cves []string) (map[string]model.EPSS
 			return nil, fmt.Errorf("EPSS query: HTTP %d", resp.StatusCode)
 		}
 		var data apiResponse
-		err = json.NewDecoder(resp.Body).Decode(&data)
+		err = httpjson.Decode(resp.Body, &data)
 		resp.Body.Close()
 		if err != nil {
 			return nil, fmt.Errorf("decode EPSS response: %w", err)

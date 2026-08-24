@@ -1,11 +1,30 @@
 package reachability
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/therxwold/GoSCAn/internal/model"
 )
+
+// TestCommandArgsAddsDatabase verifies alternate database forwarding to govulncheck.
+func TestCommandArgsAddsDatabase(t *testing.T) {
+	got := commandArgs("/src", "file:///cache/vulndb")
+	want := []string{"-C", "/src", "-json", "-test", "-db", "file:///cache/vulndb", "./..."}
+	if !slices.Equal(got, want) {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// TestCommandArgsOmitsEmptyDatabase verifies the public default remains available.
+func TestCommandArgsOmitsEmptyDatabase(t *testing.T) {
+	got := commandArgs(".", "")
+	want := []string{"-C", ".", "-json", "-test", "./..."}
+	if !slices.Equal(got, want) {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
 
 // TestParseKeepsStrongestEvidenceAndReversesTrace verifies govulncheck reduction.
 func TestParseKeepsStrongestEvidenceAndReversesTrace(t *testing.T) {

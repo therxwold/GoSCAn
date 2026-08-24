@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"sort"
 	"strings"
 	"time"
 
@@ -61,9 +62,13 @@ func Write(w io.Writer, report *model.Report, format Format, options ...WriteOpt
 
 // writeJSON encodes the complete report as indented JSON.
 func writeJSON(w io.Writer, report *model.Report) error {
+	copy := *report
+	if copy.SchemaVersion == 0 {
+		copy.SchemaVersion = model.ReportSchemaVersion
+	}
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
-	return enc.Encode(report)
+	return enc.Encode(&copy)
 }
 
 // writeTerminal renders the human-readable report and optional audit sections.
@@ -577,7 +582,8 @@ type sarifPhysicalLocation struct {
 
 // sarifArtifactLocation stores the URI of the affected project artifact.
 type sarifArtifactLocation struct {
-	URI string `json:"uri"`
+	URI       string `json:"uri"`
+	URIBaseID string `json:"uriBaseId,omitempty"`
 }
 
 // writeSARIF converts report findings and health signals into SARIF 2.1.0.
@@ -643,7 +649,7 @@ func writeSARIF(w io.Writer, r *model.Report, opts WriteOptions) error {
 		if v.Fixed != "" {
 			msg += ", fixed in " + v.Fixed
 		}
-		result := sarifResult{RuleID: v.ID, Level: sarifLevel(v.Severity), Message: sarifMessage{Text: msg}, Locations: []sarifLocation{{PhysicalLocation: sarifPhysicalLocation{ArtifactLocation: sarifArtifactLocation{URI: "go.mod"}}}}, Properties: props}
+		result := sarifResult{RuleID: v.ID, Level: sarifLevel(v.Severity), Message: sarifMessage{Text: msg}, Locations: []sarifLocation{sarifGoModLocation()}, Properties: props}
 		if f.Ignored {
 			result.Suppressions = []sarifSuppression{{Kind: "external", Status: "accepted", Justification: f.IgnoreReason}}
 		}
@@ -651,16 +657,16 @@ func writeSARIF(w io.Writer, r *model.Report, opts WriteOptions) error {
 	}
 	if r.Go != nil {
 		if r.Go.Unsupported {
-			addSARIFHealth(&rules, &results, "GOSCAN-GO-UNSUPPORTED", "error",
+			addSARIFHealth(rules, &results, "GOSCAN-GO-UNSUPPORTED", "error",
 				fmt.Sprintf("go directive %s is outside the two currently supported Go release lines; upgrade to %s", r.Go.Directive, r.Go.RecommendedDirective),
 				map[string]any{"current": r.Go.Directive, "recommended": r.Go.RecommendedDirective, "latest": r.Go.Latest})
 		} else if r.Go.DirectiveOutdated {
-			addSARIFHealth(&rules, &results, "GOSCAN-GO-OUTDATED", "warning",
+			addSARIFHealth(rules, &results, "GOSCAN-GO-OUTDATED", "warning",
 				fmt.Sprintf("go directive %s can be upgraded to %s", r.Go.Directive, r.Go.RecommendedDirective),
 				map[string]any{"current": r.Go.Directive, "recommended": r.Go.RecommendedDirective, "latest": r.Go.Latest})
 		}
 		if r.Go.ToolchainOutdated {
-			addSARIFHealth(&rules, &results, "GOSCAN-TOOLCHAIN-OUTDATED", "warning",
+			addSARIFHealth(rules, &results, "GOSCAN-TOOLCHAIN-OUTDATED", "warning",
 				fmt.Sprintf("toolchain %s can be upgraded to %s", r.Go.Toolchain, r.Go.RecommendedToolchain),
 				map[string]any{"current": r.Go.Toolchain, "recommended": r.Go.RecommendedToolchain})
 		}
@@ -680,21 +686,21 @@ func writeSARIF(w io.Writer, r *model.Report, opts WriteOptions) error {
 			if health.MaintenanceNotice != "" {
 				message += ": " + health.MaintenanceNotice
 			}
-			addSARIFHealth(&rules, &results, "GOSCAN-DEPENDENCY-UNMAINTAINED", "warning", message, props)
+			addSARIFHealth(rules, &results, "GOSCAN-DEPENDENCY-UNMAINTAINED", "warning", message, props)
 		} else if health.Archived {
-			addSARIFHealth(&rules, &results, "GOSCAN-DEPENDENCY-ARCHIVED", "warning",
+			addSARIFHealth(rules, &results, "GOSCAN-DEPENDENCY-ARCHIVED", "warning",
 				fmt.Sprintf("%s@%s repository is archived", health.Module.Path, health.Module.Version), props)
 		}
 		if health.Deprecated != "" {
 			deprecatedProps := cloneProperties(props)
 			deprecatedProps["deprecation"] = health.Deprecated
-			addSARIFHealth(&rules, &results, "GOSCAN-DEPENDENCY-DEPRECATED", "warning",
+			addSARIFHealth(rules, &results, "GOSCAN-DEPENDENCY-DEPRECATED", "warning",
 				fmt.Sprintf("%s@%s is deprecated: %s", health.Module.Path, health.Module.Version, health.Deprecated), deprecatedProps)
 		}
 		if len(health.Retracted) > 0 {
 			retractedProps := cloneProperties(props)
 			retractedProps["retractions"] = health.Retracted
-			addSARIFHealth(&rules, &results, "GOSCAN-DEPENDENCY-RETRACTED", "warning",
+			addSARIFHealth(rules, &results, "GOSCAN-DEPENDENCY-RETRACTED", "warning",
 				fmt.Sprintf("%s@%s is retracted", health.Module.Path, health.Module.Version), retractedProps)
 		}
 		if health.Stale && !health.Unmaintained {
@@ -702,22 +708,22 @@ func writeSARIF(w io.Writer, r *model.Report, opts WriteOptions) error {
 			if !health.LastPush.IsZero() {
 				staleProps["lastPush"] = health.LastPush.UTC().Format(time.RFC3339)
 			}
-			addSARIFHealth(&rules, &results, "GOSCAN-DEPENDENCY-STALE", "note",
+			addSARIFHealth(rules, &results, "GOSCAN-DEPENDENCY-STALE", "note",
 				fmt.Sprintf("%s@%s has not received a recent repository push", health.Module.Path, health.Module.Version), staleProps)
 		}
 		if health.Outdated {
 			outdatedProps := cloneProperties(props)
 			outdatedProps["latestVersion"] = health.LatestVersion
-			addSARIFHealth(&rules, &results, "GOSCAN-DEPENDENCY-OUTDATED", "note",
+			addSARIFHealth(rules, &results, "GOSCAN-DEPENDENCY-OUTDATED", "note",
 				fmt.Sprintf("%s@%s has newer version %s", health.Module.Path, health.Module.Version, health.LatestVersion), outdatedProps)
 		}
 	}
 	if r.Integrity != nil {
 		if r.Integrity.Error != "" {
-			addSARIFHealth(&rules, &results, "GOSCAN-MODULE-INTEGRITY", "error",
+			addSARIFHealth(rules, &results, "GOSCAN-MODULE-INTEGRITY", "error",
 				"go mod verify failed: "+r.Integrity.Error, map[string]any{"verified": false})
 		} else if r.Integrity.MissingGoSum {
-			addSARIFHealth(&rules, &results, "GOSCAN-MISSING-GO-SUM", "warning",
+			addSARIFHealth(rules, &results, "GOSCAN-MISSING-GO-SUM", "warning",
 				"go.sum is missing despite selected dependencies", map[string]any{"verified": r.Integrity.Verified})
 		}
 	}
@@ -726,6 +732,7 @@ func writeSARIF(w io.Writer, r *model.Report, opts WriteOptions) error {
 	for _, rule := range rules {
 		ruleList = append(ruleList, rule)
 	}
+	sort.Slice(ruleList, func(i, j int) bool { return ruleList[i].ID < ruleList[j].ID })
 	log := sarifLog{Version: "2.1.0", Schema: "https://json.schemastore.org/sarif-2.1.0.json", Runs: []sarifRun{{Tool: sarifTool{Driver: sarifDriver{Name: "GoSCAn", Version: r.ToolVersion, Rules: ruleList}}, Results: results}}}
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
@@ -733,15 +740,22 @@ func writeSARIF(w io.Writer, r *model.Report, opts WriteOptions) error {
 }
 
 // addSARIFHealth registers a synthetic health rule and appends its result.
-func addSARIFHealth(rules *map[string]sarifRule, results *[]sarifResult, id, level, message string, properties map[string]any) {
-	(*rules)[id] = sarifRule{ID: id, ShortDescription: sarifMessage{Text: message}}
+func addSARIFHealth(rules map[string]sarifRule, results *[]sarifResult, id, level, message string, properties map[string]any) {
+	rules[id] = sarifRule{ID: id, ShortDescription: sarifMessage{Text: message}}
 	*results = append(*results, sarifResult{
 		RuleID:     id,
 		Level:      level,
 		Message:    sarifMessage{Text: message},
-		Locations:  []sarifLocation{{PhysicalLocation: sarifPhysicalLocation{ArtifactLocation: sarifArtifactLocation{URI: "go.mod"}}}},
+		Locations:  []sarifLocation{sarifGoModLocation()},
 		Properties: properties,
 	})
+}
+
+// sarifGoModLocation returns a repository-root-relative go.mod artifact location.
+func sarifGoModLocation() sarifLocation {
+	return sarifLocation{PhysicalLocation: sarifPhysicalLocation{
+		ArtifactLocation: sarifArtifactLocation{URI: "go.mod", URIBaseID: "%SRCROOT%"},
+	}}
 }
 
 // cloneProperties returns a shallow copy safe for result-specific augmentation.

@@ -2,12 +2,12 @@ package gorelease
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/therxwold/GoSCAn/internal/httpjson"
 	"golang.org/x/mod/semver"
 )
 
@@ -54,7 +54,7 @@ func (c Client) Latest(ctx context.Context) (Release, error) {
 		return Release{}, fmt.Errorf("query Go releases: HTTP %d", resp.StatusCode)
 	}
 	var releases []apiRelease
-	if err := json.NewDecoder(resp.Body).Decode(&releases); err != nil {
+	if err := httpjson.Decode(resp.Body, &releases); err != nil {
 		return Release{}, fmt.Errorf("decode Go releases: %w", err)
 	}
 	var newest string

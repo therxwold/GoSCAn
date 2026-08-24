@@ -15,6 +15,7 @@ Its job is not only to say that a dependency is vulnerable. It also explains why
 - Queries OSV using the Go ecosystem and the exact selected module version.
 - Resolves packages loaded by `./...` and its tests, then uses Go advisory import-path metadata to suppress module-level matches for packages the build does not load. If package analysis is incomplete, scanning falls back conservatively to module-level results.
 - Retains vulnerable package and symbol metadata from the Go Vulnerability Database, and runs the official `govulncheck` analyzer to identify called vulnerable symbols and report source-to-sink call paths.
+- Downloads, validates, and atomically installs the official Go vulnerability database for local `govulncheck` analysis.
 - Cross-checks OSV findings against reviewed GitHub Advisory Database records.
 - Enriches CVEs with NVD metadata, CVSS, CWE references, and CISA KEV status when available.
 - Groups duplicate OSV/GO/GHSA/CVE aliases into one finding.
@@ -74,7 +75,7 @@ goscan version
 A release build prints something similar to:
 
 ```text
-goscan v0.4.0
+goscan v0.4.1
 ```
 
 ## Scan
@@ -121,6 +122,34 @@ HIGH  GO-2026-XXXX
 ```
 
 The explicit transitive pin works with Go MVS by raising the minimum selected version in the main module. GoSCAn recommends the **first fixed version**, not `@latest`, as the minimal security repair. The latest version is shown separately so the developer can choose a larger upgrade deliberately. Reachability is evidence, not an automatic suppression: a selected vulnerable module remains visible even when no call path is found.
+
+Package and call-path analysis uses the active Go environment: the current `GOOS`, `GOARCH`, build tags, and packages below `./...`, including tests. Platform- or tag-specific code outside that build context, ignored generated sources, examples not loaded as packages, and tool dependencies not selected by the module graph require separate scans under their relevant environment. An incomplete package load disables package-based filtering and falls back to conservative module-level findings.
+
+### Local Go vulnerability database
+
+Download the official Go vulnerability database snapshot into GoSCAn's user cache:
+
+```bash
+goscan db update
+```
+
+The update is installed only after the ZIP paths, required indexes, JSON, and advisory records pass validation. An existing database is preserved when download or validation fails. GoSCAn records the snapshot source, database modification time, download time, and advisory count in `.goscan.json`.
+
+`scan` and `fix` automatically use a valid snapshot at the default cache location for `govulncheck` reachability analysis. A different directory or compatible database URL can be selected with either:
+
+```bash
+goscan scan --vulndb /var/cache/goscan/vulndb
+GOSCAN_VULNDB=file:///var/cache/goscan/vulndb goscan scan
+```
+
+Install a snapshot at a custom location or mirror it from a compatible URL with:
+
+```bash
+goscan db update --path /var/cache/goscan/vulndb
+goscan db update --url https://security.example.com/vulndb.zip
+```
+
+The local snapshot currently supplies the embedded `govulncheck` analysis. GoSCAn's primary module-version lookup still queries OSV, and enabled GitHub, NVD, EPSS, release, and repository-health enrichment still uses their respective network services. Therefore `goscan db update` alone does not make an entire scan offline.
 
 ### Dependency manifest audit
 
@@ -197,7 +226,7 @@ steps:
       pr-toolchain: "true"
 ```
 
-`pr-go-version` updates the `go` directive. `pr-toolchain` only updates an existing `toolchain` directive. `pr-vulnerabilities` applies GoSCAn's verified module fixes. Maintenance warnings such as an abandoned framework are never replaced automatically because choosing a new library is an architectural decision. The Action still returns the original scan failure after opening/updating a PR, so creating a remediation PR never hides an unresolved policy violation.
+`pr-go-version` updates the `go` directive. `pr-toolchain` only updates an existing `toolchain` directive. `pr-vulnerabilities` applies GoSCAn's verified module fixes. Maintenance warnings such as an abandoned framework are never replaced automatically because choosing a new library is an architectural decision. Automatic PR generation runs only on the repository's default branch, preventing feature-branch commits from leaking into a remediation PR. The fix and verification scan reuse the initial scan's source, health, strict-enrichment, and ignore settings. The Action still returns the original scan failure after opening/updating a PR, so creating a remediation PR never hides an unresolved policy violation.
 
 ## Configuration
 
@@ -343,7 +372,7 @@ goscan scan --save-baseline .goscan-baseline.json
 goscan scan --baseline .goscan-baseline.json
 ```
 
-The comparison uses module path plus advisory ID as the stable identity. Existing findings are `unchanged`, severity increases are `regressed`, absent prior findings are `resolved`, and previously unseen findings are `new`. The classifications are included in terminal and JSON output; SARIF finding properties include the active classification.
+The comparison uses module path plus the overlapping set of primary and alias advisory IDs as the stable identity. A finding therefore stays matched when its canonical identifier changes between GO, GHSA, or CVE IDs. Existing findings are `unchanged`, severity increases are `regressed`, absent prior findings are `resolved`, and previously unseen findings are `new`. New baselines use schema version 2; version 1 baselines remain readable. The classifications are included in terminal and JSON output; SARIF finding properties include the active classification.
 
 ## Fix planning and application
 
@@ -391,6 +420,8 @@ Disable tests only when you explicitly want that behavior:
 goscan fix --apply --test=false
 ```
 
+Run `fix --apply` only on repositories you trust: `go get`, `go mod tidy`, and especially `go test ./...` can execute repository-controlled build steps or test code. Rollback protects `go.mod` and `go.sum` after ordinary command failures, but it cannot guarantee recovery from process termination, machine failure, or concurrent edits. Review the before/after dependency report because Go's module version selection may legitimately update related requirements and checksums.
+
 ## CI policy
 
 Fail when a High or Critical vulnerability exists:
@@ -430,6 +461,8 @@ JSON:
 ```bash
 goscan scan --format=json
 ```
+
+JSON reports include `schema_version: 1` so consumers can reject incompatible future report contracts explicitly.
 
 SARIF:
 

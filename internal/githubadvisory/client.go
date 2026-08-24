@@ -2,7 +2,6 @@ package githubadvisory
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +12,7 @@ import (
 	"time"
 
 	"github.com/therxwold/GoSCAn/internal/goversion"
+	"github.com/therxwold/GoSCAn/internal/httpjson"
 	"github.com/therxwold/GoSCAn/internal/model"
 )
 
@@ -167,7 +167,7 @@ func (c Client) getJSON(ctx context.Context, hc *http.Client, endpoint string, d
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
-	return json.NewDecoder(resp.Body).Decode(dst)
+	return httpjson.Decode(resp.Body, dst)
 }
 
 // normalize converts GitHub's API shape into the scanner's enrichment record.
