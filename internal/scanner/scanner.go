@@ -21,7 +21,11 @@ import (
 	"github.com/therxwold/GoSCAn/internal/osv"
 	"github.com/therxwold/GoSCAn/internal/reachability"
 	"github.com/therxwold/GoSCAn/internal/versionresolver"
+	"golang.org/x/sync/errgroup"
 )
+
+// maxConcurrentVersionQueries bounds Go subprocess and proxy pressure during health checks.
+const maxConcurrentVersionQueries = 8
 
 // dependencyLoader supplies the selected module graph and package inventory.
 type dependencyLoader interface {
@@ -420,20 +424,16 @@ func (s *Scanner) enrichDependencyHealth(ctx context.Context, deps *dependency.R
 	var latestMu sync.Mutex
 	var warningMu sync.Mutex
 	var latestErr error
-	// Resolve independent modules concurrently while bounding subprocess and
-	// network pressure for large build lists.
-	sem := make(chan struct{}, 8)
-	var wg sync.WaitGroup
+	// Resolve independent modules concurrently while bounding subprocess,
+	// network, and goroutine pressure for large build lists.
+	var group errgroup.Group
+	group.SetLimit(maxConcurrentVersionQueries)
 	for _, module := range report.Dependencies {
 		path, version, ok := module.ScanTarget()
 		if !ok || s.Versions == nil {
 			continue
 		}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
+		group.Go(func() error {
 			v, err := s.Versions.Latest(ctx, deps.Root, path)
 			if err != nil {
 				warningMu.Lock()
@@ -442,16 +442,17 @@ func (s *Scanner) enrichDependencyHealth(ctx context.Context, deps *dependency.R
 					latestErr = err
 				}
 				warningMu.Unlock()
-				return
+				return nil
 			}
 			if goversion.Compare(v, version) >= 0 {
 				latestMu.Lock()
 				latest[path] = v
 				latestMu.Unlock()
 			}
-		}()
+			return nil
+		})
 	}
-	wg.Wait()
+	group.Wait()
 	if opts.RequireLatestVersions {
 		if s.Versions == nil && len(report.Dependencies) > 0 {
 			return fmt.Errorf("latest dependency versions are required but no version resolver is configured")

@@ -8,6 +8,11 @@
 !action.yml
 !LICENSE
 !README.md
+!SPECIFICATIONS.md
+!CONFIGURATION.md
+!REMEDIATION.md
+!CI.md
+!SECURITY.md
 !Makefile
 !.gitignore
 

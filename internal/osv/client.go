@@ -18,7 +18,11 @@ import (
 	"github.com/therxwold/GoSCAn/internal/goversion"
 	"github.com/therxwold/GoSCAn/internal/httpjson"
 	"github.com/therxwold/GoSCAn/internal/model"
+	"golang.org/x/sync/errgroup"
 )
+
+// maxConcurrentRecordRequests bounds OSV detail lookups and worker allocation.
+const maxConcurrentRecordRequests = 8
 
 // Client queries OSV for vulnerabilities affecting selected Go module versions.
 type Client struct {
@@ -220,32 +224,29 @@ func groupAffectsPackages(target Target, records []Record) bool {
 func fetchRecords(ctx context.Context, hc *http.Client, base string, ids map[string]struct{}) (map[string]Record, error) {
 	out := make(map[string]Record, len(ids))
 	var mu sync.Mutex
-	var firstErr error
-	sem := make(chan struct{}, 8)
-	var wg sync.WaitGroup
+	var group errgroup.Group
+	// SetLimit bounds both live requests and allocated worker goroutines. A
+	// semaphore inside one goroutine per advisory would still allow a very large
+	// response to allocate unbounded waiting goroutines.
+	group.SetLimit(maxConcurrentRecordRequests)
 	for id := range ids {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
+		id := id
+		group.Go(func() error {
 			var r Record
 			endpoint := base + "/v1/vulns/" + url.PathEscape(id)
 			if err := doJSON(ctx, hc, http.MethodGet, endpoint, nil, &r); err != nil {
-				mu.Lock()
-				if firstErr == nil {
-					firstErr = fmt.Errorf("fetch OSV %s: %w", id, err)
-				}
-				mu.Unlock()
-				return
+				return fmt.Errorf("fetch OSV %s: %w", id, err)
 			}
 			mu.Lock()
 			out[id] = r
 			mu.Unlock()
-		}()
+			return nil
+		})
 	}
-	wg.Wait()
-	return out, firstErr
+	if err := group.Wait(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // doJSON performs one OSV JSON request and decodes a successful response.

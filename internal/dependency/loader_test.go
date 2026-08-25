@@ -66,6 +66,7 @@ require (
 
 	r := fakeRunner{
 		"go env GOMOD":         []byte(mainMod + "\n"),
+		"go env GOWORK":        []byte("\n"),
 		"go list -m -json all": []byte(fmt.Sprintf("{\"Path\":\"example.com/app\",\"Main\":true,\"GoMod\":%q,\"GoVersion\":\"1.26\"}\n{\"Path\":\"example.com/direct\",\"Version\":\"v1.0.0\",\"GoMod\":%q,\"GoVersion\":\"1.22\",\"Deprecated\":\"use example.com/new instead\"}\n{\"Path\":\"example.com/indirect\",\"Version\":\"v1.0.0\",\"GoMod\":%q,\"GoVersion\":\"1.21\"}\n{\"Path\":\"example.com/deep\",\"Version\":\"v2.0.0\",\"GoMod\":%q,\"GoVersion\":\"1.20\"}\n", mainMod, directMod, indirectMod, deepMod)),
 		"go list -m -json -retracted example.com/direct@v1.0.0 example.com/indirect@v1.0.0 example.com/deep@v2.0.0": []byte("{\"Path\":\"example.com/direct\",\"Version\":\"v1.0.0\",\"Retracted\":[\"published accidentally\"]}\n{\"Path\":\"example.com/indirect\",\"Version\":\"v1.0.0\"}\n{\"Path\":\"example.com/deep\",\"Version\":\"v2.0.0\"}\n"),
 		"go mod graph": []byte("example.com/app example.com/direct@v1.0.0\nexample.com/direct@v1.0.0 example.com/deep@v1.5.0\nexample.com/direct@v0.9.0 example.com/indirect@v1.0.0\nexample.com/app example.com/indirect@v1.0.0\n"),
@@ -132,11 +133,55 @@ require (
 	}
 }
 
+// TestLoaderRejectsActiveWorkspace prevents multiple workspace modules and
+// replacements from being collapsed into one module report.
+func TestLoaderRejectsActiveWorkspace(t *testing.T) {
+	dir := t.TempDir()
+	goMod := filepath.Join(dir, "go.mod")
+	goWork := filepath.Join(filepath.Dir(dir), "go.work")
+	runner := fakeRunner{
+		"go env GOMOD":  []byte(goMod + "\n"),
+		"go env GOWORK": []byte(goWork + "\n"),
+	}
+
+	_, err := (Loader{Runner: runner}).Load(context.Background(), dir)
+	if err == nil || !strings.Contains(err.Error(), "GOWORK=off") {
+		t.Fatalf("Load() error = %v, want active workspace guidance", err)
+	}
+}
+
+// TestActiveWorkspaceRecognizesDisabledValues verifies cross-platform disabled
+// workspace markers are not treated as active files.
+func TestActiveWorkspaceRecognizesDisabledValues(t *testing.T) {
+	for _, value := range []string{"", "off", "OFF", "/dev/null", `C:\\dev\\NUL`} {
+		if activeWorkspace(value) {
+			t.Errorf("activeWorkspace(%q) = true, want false", value)
+		}
+	}
+	if !activeWorkspace("/repo/go.work") {
+		t.Fatal("activeWorkspace() did not recognize a workspace file")
+	}
+}
+
 // TestParseModuleRef verifies module path and version splitting.
 func TestParseModuleRef(t *testing.T) {
 	got, ok := ParseModuleRef("golang.org/x/net@v0.42.0")
 	if !ok || got.Path != "golang.org/x/net" || got.Version != "v0.42.0" {
 		t.Fatalf("%+v %v", got, ok)
+	}
+}
+
+// TestParseGraphCountsMalformedRecords verifies unexpected Go command output is
+// surfaced as degraded path evidence instead of disappearing silently.
+func TestParseGraphCountsMalformedRecords(t *testing.T) {
+	selected := map[string]string{"example.com/app": "", "example.com/dep": "v1.0.0"}
+	graph, dropped := parseGraph([]byte("example.com/app example.com/dep@v1.0.0\nmalformed\ntoo many fields here\n"), selected)
+	if dropped != 2 {
+		t.Fatalf("parseGraph() dropped = %d, want 2", dropped)
+	}
+	graph.AddRoot("example.com/app")
+	if paths := graph.PathsTo("example.com/dep", 1); len(paths) != 1 {
+		t.Fatalf("parseGraph() valid paths = %v, want one", paths)
 	}
 }
 

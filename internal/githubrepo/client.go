@@ -12,7 +12,11 @@ import (
 	"time"
 
 	"github.com/therxwold/GoSCAn/internal/httpjson"
+	"golang.org/x/sync/errgroup"
 )
+
+// maxConcurrentRepositoryRequests bounds GitHub API pressure and worker allocation.
+const maxConcurrentRepositoryRequests = 6
 
 // Client queries GitHub repository metadata used for dependency maintenance health checks.
 type Client struct {
@@ -63,30 +67,26 @@ func (c Client) Query(ctx context.Context, modulePaths []string, readmeCutoff ti
 	}
 
 	var mu sync.Mutex
-	var firstErr error
-	sem := make(chan struct{}, 6)
-	var wg sync.WaitGroup
+	var group errgroup.Group
+	// Bound allocated workers as well as requests for enterprise-sized graphs.
+	group.SetLimit(maxConcurrentRepositoryRequests)
 	for _, repo := range repos {
 		repo := repo
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
+		group.Go(func() error {
 			record, err := c.queryOne(ctx, hc, base, repo, readmeCutoff)
-			mu.Lock()
-			defer mu.Unlock()
 			if err != nil {
-				if firstErr == nil {
-					firstErr = err
-				}
-				return
+				return err
 			}
+			mu.Lock()
 			out[repo] = record
-		}()
+			mu.Unlock()
+			return nil
+		})
 	}
-	wg.Wait()
-	return out, firstErr
+	if err := group.Wait(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // queryOne retrieves repository metadata and inspects stale repositories for maintenance notices.

@@ -8,6 +8,7 @@ import (
 	"io"
 	"maps"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
@@ -25,7 +26,7 @@ import (
 )
 
 // Version is the current GoSCAn version.
-const Version string = "v0.4.2"
+const Version string = "v0.4.3"
 
 // Run starts GoSCAn and exits with the command result code.
 func Run() {
@@ -37,7 +38,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) > 0 {
 		switch args[0] {
 		case "-v", "--version", "version":
-			fmt.Fprintf(stdout, "goscan %s\n", Version)
+			goVersion := strings.TrimPrefix(runtime.Version(), "go")
+			fmt.Fprintf(stdout, "goscan %s\ngo%s %s/%s\n", Version, goVersion, runtime.GOOS, runtime.GOARCH)
 			return 0
 		case "help", "-h", "--help":
 			usage(stdout)

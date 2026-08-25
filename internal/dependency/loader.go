@@ -72,6 +72,17 @@ func (l Loader) Load(ctx context.Context, dir string) (*Result, error) {
 	if gomod == "" || gomod == "/dev/null" || strings.EqualFold(filepath.Base(gomod), "NUL") {
 		return nil, errors.New("no go.mod found; run goscan inside a Go module")
 	}
+	goworkOut, err := l.Runner.Run(ctx, dir, "go", "env", "GOWORK")
+	if err != nil {
+		return nil, fmt.Errorf("inspect Go workspace: %w: %s", err, strings.TrimSpace(string(goworkOut)))
+	}
+	if gowork := strings.TrimSpace(string(goworkOut)); activeWorkspace(gowork) {
+		// A workspace can contribute additional main modules and replacements to
+		// every later Go command. Combining that state with one module's manifest
+		// would misclassify dependencies, so fail until aggregate workspace scans
+		// have an explicit report model.
+		return nil, fmt.Errorf("active Go workspace %q is not supported for a single-module scan; run with GOWORK=off or scan a copy outside the workspace", gowork)
+	}
 	root := filepath.Dir(gomod)
 
 	mainPath, mainRequirements, err := readManifest(gomod, nil)
@@ -144,7 +155,7 @@ func (l Loader) Load(ctx context.Context, dir string) (*Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read module graph: %w: %s", err, strings.TrimSpace(string(graphOut)))
 	}
-	graph := ParseGraph(graphOut, selected)
+	graph, droppedGraphLines := parseGraph(graphOut, selected)
 	graph.AddRoot(mainPath)
 
 	// The difference between these two package sets identifies dependencies that
@@ -170,6 +181,9 @@ func (l Loader) Load(ctx context.Context, dir string) (*Result, error) {
 	}
 	if packageWarning != "" {
 		warnings = append(warnings, packageWarning)
+	}
+	if droppedGraphLines > 0 {
+		warnings = append(warnings, fmt.Sprintf("module graph contained %d malformed non-empty line(s); dependency paths may be incomplete", droppedGraphLines))
 	}
 	for _, listedModule := range listed {
 		if listedModule.Main || listedModule.GoMod == "" {
@@ -207,6 +221,20 @@ func (l Loader) Load(ctx context.Context, dir string) (*Result, error) {
 		Packages: packages, RuntimePackages: runtimePackages, TestPackages: testPackages,
 		PackageAnalysis: packageAnalysis, Integrity: integrity, Warnings: warnings,
 	}, nil
+}
+
+// activeWorkspace reports whether go env GOWORK names an active workspace file.
+func activeWorkspace(value string) bool {
+	if value == "" || strings.EqualFold(value, "off") || value == "/dev/null" {
+		return false
+	}
+	base := filepath.Base(value)
+	// Tests and remote runners can inspect paths written for another operating
+	// system, so recognize both path separator styles independently of GOOS.
+	if separator := strings.LastIndexAny(value, `/\`); separator >= 0 {
+		base = value[separator+1:]
+	}
+	return !strings.EqualFold(base, "NUL")
 }
 
 // loadRetractions enriches selected modules with exact-version retraction reasons.
@@ -463,15 +491,29 @@ func NewGraph(selected map[string]string) *Graph {
 
 // ParseGraph parses go mod graph output into a selected-version dependency graph.
 func ParseGraph(data []byte, selected map[string]string) *Graph {
+	graph, _ := parseGraph(data, selected)
+	return graph
+}
+
+// parseGraph parses graph output and counts malformed non-empty records so the
+// loader can expose degraded dependency-path evidence without hiding modules
+// from the separately authoritative selected build list.
+func parseGraph(data []byte, selected map[string]string) (*Graph, int) {
 	g := NewGraph(selected)
+	dropped := 0
 	for _, line := range strings.Split(string(data), "\n") {
 		fields := strings.Fields(line)
-		if len(fields) != 2 {
+		if len(fields) == 0 {
 			continue
 		}
-		parent, _ := ParseModuleRef(fields[0])
-		child, _ := ParseModuleRef(fields[1])
-		if parent.Path == "" || child.Path == "" {
+		if len(fields) != 2 {
+			dropped++
+			continue
+		}
+		parent, parentOK := ParseModuleRef(fields[0])
+		child, childOK := ParseModuleRef(fields[1])
+		if !parentOK || !childOK || parent.Path == "" || child.Path == "" {
+			dropped++
 			continue
 		}
 		selectedParent, ok := selected[parent.Path]
@@ -501,7 +543,7 @@ func ParseGraph(data []byte, selected map[string]string) *Graph {
 			return g.requirements[k][i].Version < g.requirements[k][j].Version
 		})
 	}
-	return g
+	return g, dropped
 }
 
 // RequirementsFrom returns requirements declared by the selected version of parent.

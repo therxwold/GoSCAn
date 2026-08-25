@@ -14,7 +14,11 @@ import (
 	"github.com/therxwold/GoSCAn/internal/goversion"
 	"github.com/therxwold/GoSCAn/internal/httpjson"
 	"github.com/therxwold/GoSCAn/internal/model"
+	"golang.org/x/sync/errgroup"
 )
+
+// maxConcurrentAdvisoryRequests bounds GitHub API pressure and worker allocation.
+const maxConcurrentAdvisoryRequests = 6
 
 // Client queries the GitHub Advisory Database for reviewed public advisories.
 type Client struct {
@@ -84,33 +88,29 @@ func (c Client) Query(ctx context.Context, ids []string) (map[string]Record, err
 	}
 
 	var mu sync.Mutex
-	var firstErr error
-	// Bound concurrency to avoid turning a large alias set into a GitHub API burst.
-	sem := make(chan struct{}, 6)
-	var wg sync.WaitGroup
+	var group errgroup.Group
+	// Limit goroutine creation as well as HTTP concurrency so unusually large
+	// advisory sets cannot accumulate one blocked goroutine per identifier.
+	group.SetLimit(maxConcurrentAdvisoryRequests)
 	for _, id := range ids {
 		id := id
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
+		group.Go(func() error {
 			record, ok, err := c.queryOne(ctx, hc, base, id)
-			mu.Lock()
-			defer mu.Unlock()
 			if err != nil {
-				if firstErr == nil {
-					firstErr = err
-				}
-				return
+				return err
 			}
 			if ok {
+				mu.Lock()
 				out[id] = record
+				mu.Unlock()
 			}
-		}()
+			return nil
+		})
 	}
-	wg.Wait()
-	return out, firstErr
+	if err := group.Wait(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // queryOne retrieves and normalizes one GHSA or CVE identifier.
