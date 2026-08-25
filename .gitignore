@@ -6,6 +6,7 @@
 !go.sum
 !config.yml
 !action.yml
+!build.sh
 !LICENSE
 !README.md
 !SPECIFICATIONS.md

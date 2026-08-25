@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -134,6 +135,21 @@ func TestDatabaseURL(t *testing.T) {
 	}
 	if !strings.HasPrefix(got, "file://") || !strings.Contains(got, "/vulndb") {
 		t.Fatalf("local URL=%q", got)
+	}
+	if runtime.GOOS == "windows" && !strings.HasPrefix(got, "file:///") {
+		t.Fatalf("Windows drive path does not have a canonical file URL: %q", got)
+	}
+	if runtime.GOOS == "windows" {
+		got, err := DatabaseURL(`\\server\share\vulndb`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "file://server/share/vulndb" {
+			t.Fatalf("Windows UNC URL=%q", got)
+		}
+	}
+	if got, err := DatabaseURL("file:///C:/vulndb"); err != nil || got != "file:///C:/vulndb" {
+		t.Fatalf("existing file URL: got=%q err=%v", got, err)
 	}
 	if _, err := DatabaseURL("ftp://example.test/db"); err == nil {
 		t.Fatal("expected unsupported scheme error")

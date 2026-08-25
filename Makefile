@@ -2,7 +2,7 @@ BINARY := goscan
 LDFLAGS := -s -w
 GOVULNCHECK_VERSION := v1.7.0
 
-.PHONY: build test test-race vet verify tidy-check security check release-check install clean
+.PHONY: build test test-race vet verify tidy-check security check release-check release-dist install clean
 
 build:
 	mkdir -p bin
@@ -32,8 +32,11 @@ check: test vet build
 release-check: tidy-check verify test-race vet build security
 	./bin/$(BINARY) version
 
+release-dist:
+	./build.sh
+
 install:
 	go install -trimpath -ldflags '$(LDFLAGS)' ./cmd/goscan
 
 clean:
-	rm -rf bin coverage.out
+	rm -rf bin coverage.out dist

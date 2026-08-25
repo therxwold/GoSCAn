@@ -182,6 +182,16 @@ Do not equate exit status `0` with universal safety. It means the configured
 checks completed without crossing their current thresholds under the analyzed
 build context.
 
+Release downloads include `SHA256SUMS`. After downloading all four release
+assets into one directory, verify the archives before extraction:
+
+```bash
+sha256sum --check SHA256SUMS
+```
+
+On systems without `sha256sum`, use the platform's SHA-256 verification tool and
+compare it with the corresponding entry.
+
 ## Workspace and build-context coverage
 
 GoSCAn analyzes the active `GOOS`, `GOARCH`, build tags, and packages below

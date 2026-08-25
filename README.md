@@ -30,8 +30,8 @@ evidence.
 
 ## Requirements
 
-GoSCAn requires Go 1.26 or newer. Development and release builds prefer the
-`toolchain go1.26.6` directive declared by this module.
+GoSCAn requires Go 1.26 or newer. Development and release builds use the
+`toolchain go1.27` directive declared by this module.
 
 ## Build
 
@@ -142,6 +142,12 @@ make release-check
 
 This checks module tidiness and checksums, runs the race-enabled test suite and
 vet, builds GoSCAn, and scans GoSCAn itself with `govulncheck`.
+
+Build the three versioned release archives and `SHA256SUMS` locally with:
+
+```bash
+make release-dist
+```
 
 ## Credits
 

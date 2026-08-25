@@ -130,7 +130,7 @@ jobs:
 
 The Action:
 
-- builds GoSCAn with Go 1.26.6;
+- builds GoSCAn with Go 1.27;
 - scans `path` inside the caller workspace;
 - uses `github.token` for GitHub enrichment unless
   `GOSCAN_GITHUB_TOKEN` is explicitly supplied;
@@ -230,6 +230,45 @@ Apply the same controls regardless of platform:
 - cap job duration above GoSCAn's own timeout;
 - configure private module proxy and checksum behavior;
 - scan each module independently.
+
+## Publishing releases
+
+The source version in `internal/app/app.go` must match the pushed Git tag. Build
+the release assets locally with:
+
+```bash
+make release-check
+make release-dist
+```
+
+Assets are written under `dist/<version>/`:
+
+```text
+goscan-vX.Y.Z-linux-amd64.tar.gz
+goscan-vX.Y.Z-darwin-arm64.tar.gz
+goscan-vX.Y.Z-windows-amd64.zip
+SHA256SUMS
+```
+
+Every archive contains the platform binary, license, example configuration, and
+public user documentation.
+
+Pushing a `v*` tag triggers `.github/workflows/release.yml`. The workflow:
+
+1. runs the complete release gate;
+2. rejects a tag that differs from the source version;
+3. cross-compiles and packages all three targets;
+4. creates the GitHub Release with generated notes;
+5. uploads the archives and SHA-256 checksum file.
+
+Recommended release commands are:
+
+```bash
+git tag -s vX.Y.Z -m "GoSCAn vX.Y.Z"
+git push origin vX.Y.Z
+```
+
+Use the current source version rather than copying the example version literally.
 
 ## Reproducibility checklist
 

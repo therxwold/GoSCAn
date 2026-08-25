@@ -64,6 +64,9 @@ func DatabaseURL(value string) (string, error) {
 	if value == "" {
 		return "", nil
 	}
+	if filepath.IsAbs(value) {
+		return databaseFileURL(filepath.Clean(value)), nil
+	}
 	parsed, err := url.Parse(value)
 	if err != nil {
 		return "", fmt.Errorf("parse vulnerability database location: %w", err)
@@ -80,7 +83,25 @@ func DatabaseURL(value string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve vulnerability database path: %w", err)
 	}
-	return (&url.URL{Scheme: "file", Path: filepath.ToSlash(abs)}).String(), nil
+	return databaseFileURL(abs), nil
+}
+
+// databaseFileURL converts an absolute native path into a canonical file URL.
+// Windows drive paths need a leading slash, while UNC paths encode their server
+// name as the URL host.
+func databaseFileURL(path string) string {
+	if volume := filepath.VolumeName(path); volume != "" {
+		if strings.HasPrefix(volume, `\\`) {
+			slashPath := filepath.ToSlash(path[2:])
+			host, rest, found := strings.Cut(slashPath, "/")
+			if !found {
+				rest = ""
+			}
+			return (&url.URL{Scheme: "file", Host: host, Path: "/" + rest}).String()
+		}
+		return (&url.URL{Scheme: "file", Path: "/" + filepath.ToSlash(path)}).String()
+	}
+	return (&url.URL{Scheme: "file", Path: filepath.ToSlash(path)}).String()
 }
 
 // Installed reports whether path contains the required database indexes.

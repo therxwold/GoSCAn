@@ -1,0 +1,53 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Publish ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27"
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Run release checks
+        run: make release-check
+
+      - name: Build release assets
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: make release-dist
+
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          assets=("dist/$GITHUB_REF_NAME"/*)
+          if [[ "${#assets[@]}" -ne 4 ]]; then
+            echo "Expected three archives and SHA256SUMS, found ${#assets[@]} assets" >&2
+            exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
+            --verify-tag \
+            --generate-notes \
+            --title "$GITHUB_REF_NAME"

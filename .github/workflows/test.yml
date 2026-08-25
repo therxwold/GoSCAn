@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   quality:
-    name: Go 1.26.6 quality gate
+    name: Go 1.27 quality gate
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -22,7 +22,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.26.6"
+          go-version: "1.27"
           cache: true
           cache-dependency-path: go.sum
       - name: Verify module files are tidy
@@ -57,7 +57,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.26.6"
+          go-version: "1.27"
           cache: true
           cache-dependency-path: go.sum
       - run: go test -count=1 ./...
