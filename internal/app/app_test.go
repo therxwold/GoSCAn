@@ -40,12 +40,18 @@ func TestRunDBUpdate(t *testing.T) {
 
 	destination := filepath.Join(t.TempDir(), "vulndb")
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"db", "update", "--url", server.URL, "--path", destination}, &stdout, &stderr)
+	code := run([]string{"db", "update", "--url", server.URL, "--path", destination, "--log-level", "info", "--log-format", "json"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit=%d stderr=%s", code, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "Advisories: 1") {
 		t.Fatalf("stdout=%q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), `"command":"db update"`) || !strings.Contains(stderr.String(), `"message":"command started"`) || !strings.Contains(stderr.String(), `"message":"command finished"`) {
+		t.Fatalf("structured diagnostics missing from stderr=%q", stderr.String())
+	}
+	if strings.Contains(stdout.String(), `"message":"command started"`) {
+		t.Fatalf("diagnostics contaminated stdout=%q", stdout.String())
 	}
 	if _, err := os.Stat(filepath.Join(destination, "index", "db.json")); err != nil {
 		t.Fatalf("database was not installed: %v", err)

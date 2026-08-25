@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/therxwold/GoSCAn/internal/goversion"
+	"github.com/therxwold/GoSCAn/internal/httpclient"
 	"github.com/therxwold/GoSCAn/internal/httpjson"
 	"github.com/therxwold/GoSCAn/internal/model"
 	"golang.org/x/sync/errgroup"
@@ -84,7 +85,7 @@ func (c Client) Query(ctx context.Context, ids []string) (map[string]Record, err
 	}
 	hc := c.HTTPClient
 	if hc == nil {
-		hc = &http.Client{Timeout: 15 * time.Second}
+		hc = httpclient.New(15 * time.Second)
 	}
 
 	var mu sync.Mutex

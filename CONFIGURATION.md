@@ -8,7 +8,7 @@ defaults and environment variables for secrets.
 Effective configuration is assembled in this order:
 
 ```text
-built-in defaults < config.yml < credential environment variables < CLI flags
+built-in defaults < config.yml < supported environment variables < CLI flags
 ```
 
 The YAML decoder is strict. Unknown fields and multiple YAML documents return an
@@ -34,11 +34,11 @@ The GitHub Action uses `--no-config` unless its `config` input is set explicitly
 ```yaml
 github:
   enabled: true
-  token: "${GOSCAN_GITHUB_TOKEN}"
+  token: ${GOSCAN_GITHUB_TOKEN}
 
 nvd:
   enabled: true
-  api_key: "${GOSCAN_NVD_API_KEY}"
+  api_key: ${GOSCAN_NVD_API_KEY}
 
 epss:
   enabled: true
@@ -46,10 +46,10 @@ epss:
 ignore:
   show: false
   # GO-2026-1234:
-  #   reason: "vulnerable code path is not reachable"
-  #   owner: "security@example.com"
+  #   reason: vulnerable code path is not reachable
+  #   owner: security@example.com
   #   expires: "2026-12-31"
-  # golang.org/x/net@CVE-2026-12345: "unsupported target only"
+  # golang.org/x/net@CVE-2026-12345: unsupported target only
 
 health:
   enabled: true
@@ -59,21 +59,25 @@ health:
   fail_on_unmaintained: false
 
 scan:
-  fail_on: "none"
+  fail_on: none
   epss_threshold: -1
   show_manifests: false
   strict_enrichment: false
-  timeout: "2m"
+  timeout: 2m
 
 fix:
   run_tests: true
   vulnerabilities: true
   upgrade_go: false
   upgrade_toolchain: false
-  timeout: "5m"
+  timeout: 5m
 
 output:
-  format: "terminal"
+  format: terminal
+
+logging:
+  level: disabled
+  format: text
 ```
 
 The repository's `config.yml` is the maintained example for the exact current
@@ -141,9 +145,9 @@ The scan and fix commands have independent overall timeouts:
 
 ```yaml
 scan:
-  timeout: "2m"
+  timeout: 2m
 fix:
-  timeout: "5m"
+  timeout: 5m
 ```
 
 Override them per invocation:
@@ -155,6 +159,46 @@ goscan fix --timeout 10m
 
 Timeouts must be positive. Built-in HTTP clients also have request-level default
 timeouts; the overall context remains the upper bound for the complete command.
+
+Provider requests make at most three attempts for transient network failures and
+HTTP 408, 425, 429, 500, 502, 503, and 504 responses. Retries use exponential
+full jitter, honor `Retry-After` up to the bounded two-second delay, and stop
+immediately when the command context is canceled. Other 4xx responses are not
+retried.
+
+## Diagnostic logging
+
+Zerolog diagnostics are disabled by default. Enable human-readable diagnostics:
+
+```bash
+goscan scan --log-level info --log-format text
+```
+
+Emit newline-delimited JSON diagnostics for collection by CI or a log platform:
+
+```bash
+goscan scan --log-level debug --log-format json
+```
+
+Supported levels are `disabled`, `trace`, `debug`, `info`, `warn`, and `error`.
+Supported formats are `text` and `json`. Configuration and environment
+equivalents are:
+
+```yaml
+logging:
+  level: disabled
+  format: text
+```
+
+```bash
+export GOSCAN_LOG_LEVEL=warn
+export GOSCAN_LOG_FORMAT=json
+```
+
+Diagnostics always go to stderr. Reports continue to use stdout, so do not merge
+the streams when producing JSON or SARIF. Retry events include method, provider
+host, status, attempt, and delay, but omit URL paths, queries, request bodies,
+advisory identifiers, and module paths.
 
 ## Health settings
 
@@ -186,10 +230,10 @@ or any known GO/GHSA/CVE alias.
 ```yaml
 ignore:
   show: false
-  GO-2026-1234: "upstream confirmed the application is unaffected"
+  GO-2026-1234: upstream confirmed the application is unaffected
   CVE-2026-56789:
-    reason: "unsupported platform only"
-    owner: "security@example.com"
+    reason: unsupported platform only
+    owner: security@example.com
     expires: "2026-12-31"
 ```
 
@@ -198,8 +242,8 @@ Limit an exception to one module by prefixing the identifier:
 ```yaml
 ignore:
   golang.org/x/net@CVE-2026-56789:
-    reason: "affected package is excluded from supported builds"
-    owner: "networking-team@example.com"
+    reason: affected package is excluded from supported builds
+    owner: networking-team@example.com
     expires: "2026-10-01"
 ```
 

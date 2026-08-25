@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/therxwold/GoSCAn/internal/httpclient"
 )
 
 const (
@@ -214,7 +216,7 @@ func (u Updater) download(ctx context.Context, dst *os.File) error {
 	req.Header.Set("User-Agent", "GoSCAn vulnerability database updater")
 	client := u.Client
 	if client == nil {
-		client = &http.Client{Timeout: 2 * time.Minute}
+		client = httpclient.New(2 * time.Minute)
 	}
 	resp, err := client.Do(req)
 	if err != nil {

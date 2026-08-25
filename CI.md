@@ -92,6 +92,14 @@ they carry accepted external suppressions.
 
 When redirecting a machine format, do not merge stderr into the output file.
 
+Optional Zerolog diagnostics also use stderr. Enable newline-delimited JSON logs
+without contaminating a JSON report:
+
+```bash
+GOSCAN_LOG_LEVEL=info GOSCAN_LOG_FORMAT=json \
+  goscan scan --format json > goscan.json 2> goscan.log.jsonl
+```
+
 ## Read-only GitHub Action
 
 Pin both checkout and GoSCAn to reviewed full commit SHAs:
@@ -123,6 +131,8 @@ jobs:
           fail-on: high
           epss-threshold: "0.10"
           strict-enrichment: "true"
+          log-level: info
+          log-format: json
           ignore: |
             GO-2026-1234=confirmed false positive
             golang.org/x/net@CVE-2026-56789=unsupported target only

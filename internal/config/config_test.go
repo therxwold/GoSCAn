@@ -43,6 +43,9 @@ fix:
   timeout: "3m"
 output:
   format: "json"
+logging:
+  level: "debug"
+  format: "json"
 `)
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
@@ -63,7 +66,7 @@ output:
 	if cfg.Scan.FailOn != "high" || cfg.Scan.EPSSThreshold != 0.2 || !cfg.Scan.ShowManifests || !cfg.Scan.StrictEnrichment || cfg.Scan.Timeout != 45*time.Second {
 		t.Fatalf("unexpected scan config: %#v", cfg)
 	}
-	if cfg.Fix.RunTests || cfg.Fix.Vulnerabilities || !cfg.Fix.UpgradeGo || !cfg.Fix.UpgradeToolchain || cfg.Fix.Timeout != 3*time.Minute || cfg.Output.Format != "json" {
+	if cfg.Fix.RunTests || cfg.Fix.Vulnerabilities || !cfg.Fix.UpgradeGo || !cfg.Fix.UpgradeToolchain || cfg.Fix.Timeout != 3*time.Minute || cfg.Output.Format != "json" || cfg.Logging.Level != "debug" || cfg.Logging.Format != "json" {
 		t.Fatalf("unexpected remaining config: %#v", cfg)
 	}
 }
@@ -72,12 +75,33 @@ output:
 func TestEnvironmentOverridesSecrets(t *testing.T) {
 	t.Setenv("GOSCAN_GITHUB_TOKEN", "env-github")
 	t.Setenv("GOSCAN_NVD_API_KEY", "env-nvd")
+	t.Setenv("GOSCAN_LOG_LEVEL", "warn")
+	t.Setenv("GOSCAN_LOG_FORMAT", "json")
 	cfg, err := Load(filepath.Join(t.TempDir(), "missing.yml"), false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.GitHub.Token != "env-github" || cfg.NVD.APIKey != "env-nvd" {
+	if cfg.GitHub.Token != "env-github" || cfg.NVD.APIKey != "env-nvd" || cfg.Logging.Level != "warn" || cfg.Logging.Format != "json" {
 		t.Fatalf("environment did not override secrets: %#v", cfg)
+	}
+}
+
+// TestConfigRejectsInvalidLogging verifies strict diagnostic level and format
+// validation for configuration files.
+func TestConfigRejectsInvalidLogging(t *testing.T) {
+	for name, data := range map[string]string{
+		"level":  "logging:\n  level: loud\n",
+		"format": "logging:\n  format: xml\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yml")
+			if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load(path, true); err == nil {
+				t.Fatal("expected invalid logging configuration to fail")
+			}
+		})
 	}
 }
 

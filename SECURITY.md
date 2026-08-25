@@ -74,6 +74,12 @@ Recommended controls:
 - do not copy tokens into CLI arguments;
 - review proxy credentials independently from provider credentials.
 
+Zerolog diagnostics are disabled by default. Retry events deliberately omit URL
+paths, query parameters, request bodies, advisory identifiers, and module paths.
+Provider hostnames, HTTP status codes, timing, and transport errors remain
+visible. Treat diagnostic output as operational metadata and retain it according
+to the same controls as scan reports.
+
 ## Provider failure model
 
 OSV is authoritative. If it fails, the scan cannot claim a complete

@@ -84,6 +84,19 @@ OSV records are normalized as follows:
 OSV is authoritative for finding identity. GitHub, NVD, and EPSS enrich existing
 findings; they do not independently create or erase an OSV finding.
 
+## Provider request reliability
+
+Built-in HTTP clients bound each logical request with a client timeout and make
+at most three attempts. Retries apply only to transient network failures and
+HTTP 408, 425, 429, 500, 502, 503, and 504 responses. Request bodies must be
+replayable; this permits safe retry of the OSV batch query without changing its
+payload. Ordinary 4xx responses fail immediately.
+
+Backoff uses exponential full jitter. A valid `Retry-After` value takes
+precedence but is capped by the two-second retry-delay ceiling. Response bodies
+from failed attempts are closed and drained only to a bounded limit. Command
+cancellation interrupts both active requests and retry waits.
+
 ## Reachability
 
 GoSCAn runs the official `govulncheck` analyzer over application and test

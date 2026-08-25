@@ -16,6 +16,7 @@ import (
 
 	"github.com/therxwold/GoSCAn/internal/cvss"
 	"github.com/therxwold/GoSCAn/internal/goversion"
+	"github.com/therxwold/GoSCAn/internal/httpclient"
 	"github.com/therxwold/GoSCAn/internal/httpjson"
 	"github.com/therxwold/GoSCAn/internal/model"
 	"golang.org/x/sync/errgroup"
@@ -121,7 +122,7 @@ func (c Client) Query(ctx context.Context, targets []Target) (map[string][]model
 	}
 	hc := c.HTTPClient
 	if hc == nil {
-		hc = &http.Client{Timeout: 20 * time.Second}
+		hc = httpclient.New(20 * time.Second)
 	}
 
 	idsByTarget := make(map[string][]string, len(targets))
