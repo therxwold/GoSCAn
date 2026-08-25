@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/therxwold/GoSCAn/internal/httpclient"
 	"github.com/therxwold/GoSCAn/internal/httpjson"
 	"golang.org/x/mod/semver"
 )
@@ -37,7 +38,7 @@ func (c Client) Latest(ctx context.Context) (Release, error) {
 	}
 	hc := c.HTTPClient
 	if hc == nil {
-		hc = &http.Client{Timeout: 15 * time.Second}
+		hc = httpclient.New(15 * time.Second)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/dl/?mode=json", nil)
 	if err != nil {

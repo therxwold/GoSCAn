@@ -22,6 +22,14 @@ inputs:
     description: Output format (terminal, json, sarif).
     required: false
     default: terminal
+  log-level:
+    description: Zerolog diagnostic level (disabled, trace, debug, info, warn, error).
+    required: false
+    default: disabled
+  log-format:
+    description: Zerolog diagnostic format (text, json).
+    required: false
+    default: text
   output-file:
     description: Optional report path relative to the repository root. Empty writes to the workflow log.
     required: false
@@ -128,6 +136,8 @@ runs:
         GOSCAN_EPSS_THRESHOLD: ${{ inputs.epss-threshold }}
         GOSCAN_STRICT_ENRICHMENT: ${{ inputs.strict-enrichment }}
         GOSCAN_FORMAT: ${{ inputs.format }}
+        GOSCAN_LOG_LEVEL: ${{ inputs.log-level }}
+        GOSCAN_LOG_FORMAT: ${{ inputs.log-format }}
         GOSCAN_OUTPUT_FILE: ${{ inputs.output-file }}
         GOSCAN_CONFIG: ${{ inputs.config }}
         GOSCAN_PATH: ${{ inputs.path }}
@@ -169,7 +179,7 @@ runs:
         validate_repo_relative config "$GOSCAN_CONFIG"
         validate_repo_relative output-file "$GOSCAN_OUTPUT_FILE"
 
-        args=(scan --fail-on "$GOSCAN_FAIL_ON" --epss-threshold "$GOSCAN_EPSS_THRESHOLD" --format "$GOSCAN_FORMAT")
+        args=(scan --fail-on "$GOSCAN_FAIL_ON" --epss-threshold "$GOSCAN_EPSS_THRESHOLD" --format "$GOSCAN_FORMAT" --log-level "$GOSCAN_LOG_LEVEL" --log-format "$GOSCAN_LOG_FORMAT")
         if [[ "$GOSCAN_STRICT_ENRICHMENT" == "true" ]]; then
           args+=(--strict-enrichment)
         fi
@@ -242,6 +252,8 @@ runs:
         GOSCAN_DEFAULT_GITHUB_TOKEN: ${{ github.token }}
         GOSCAN_CONFIG: ${{ inputs.config }}
         GOSCAN_PATH: ${{ inputs.path }}
+        GOSCAN_LOG_LEVEL: ${{ inputs.log-level }}
+        GOSCAN_LOG_FORMAT: ${{ inputs.log-format }}
         GOSCAN_STRICT_ENRICHMENT: ${{ inputs.strict-enrichment }}
         GOSCAN_NO_GITHUB: ${{ inputs.no-github }}
         GOSCAN_NO_NVD: ${{ inputs.no-nvd }}
@@ -264,7 +276,7 @@ runs:
           export GOSCAN_GITHUB_TOKEN="$GOSCAN_DEFAULT_GITHUB_TOKEN"
         fi
 
-        args=(fix --apply --vulnerabilities="$GOSCAN_PR_VULNERABILITIES" --upgrade-go="$GOSCAN_PR_GO_VERSION" --upgrade-toolchain="$GOSCAN_PR_TOOLCHAIN")
+        args=(fix --apply --vulnerabilities="$GOSCAN_PR_VULNERABILITIES" --upgrade-go="$GOSCAN_PR_GO_VERSION" --upgrade-toolchain="$GOSCAN_PR_TOOLCHAIN" --log-level "$GOSCAN_LOG_LEVEL" --log-format "$GOSCAN_LOG_FORMAT")
         if [[ -n "$GOSCAN_CONFIG" ]]; then
           args+=(--config "$GOSCAN_CONFIG")
         else

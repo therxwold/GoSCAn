@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/therxwold/GoSCAn/internal/httpclient"
 	"github.com/therxwold/GoSCAn/internal/httpjson"
 	"github.com/therxwold/GoSCAn/internal/model"
 )
@@ -89,7 +90,7 @@ func (c Client) Query(ctx context.Context, cves []string) (map[string]Record, er
 	}
 	hc := c.HTTPClient
 	if hc == nil {
-		hc = &http.Client{Timeout: 20 * time.Second}
+		hc = httpclient.New(20 * time.Second)
 	}
 
 	for i := 0; i < len(cves); i += 100 {

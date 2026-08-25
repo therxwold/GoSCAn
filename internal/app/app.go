@@ -14,6 +14,7 @@ import (
 
 	"github.com/therxwold/GoSCAn/internal/baseline"
 	"github.com/therxwold/GoSCAn/internal/config"
+	"github.com/therxwold/GoSCAn/internal/diagnostic"
 	"github.com/therxwold/GoSCAn/internal/fixer"
 	"github.com/therxwold/GoSCAn/internal/githubadvisory"
 	"github.com/therxwold/GoSCAn/internal/githubrepo"
@@ -26,7 +27,7 @@ import (
 )
 
 // Version is the current GoSCAn version.
-const Version string = "v0.4.4"
+const Version string = "v0.4.5"
 
 // Run starts GoSCAn and exits with the command result code.
 func Run() {
@@ -97,6 +98,8 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 	timeout := fs.Duration("timeout", cfg.Scan.Timeout, "overall scan timeout")
 	baselinePath := fs.String("baseline", "", "compare findings with a saved baseline JSON file")
 	saveBaseline := fs.String("save-baseline", "", "save current findings as a baseline JSON file")
+	logLevel := fs.String("log-level", cfg.Logging.Level, "diagnostic log level: disabled, trace, debug, info, warn, error")
+	logFormat := fs.String("log-format", cfg.Logging.Format, "diagnostic log format: text, json")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -165,6 +168,12 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
+	ctx, finishDiagnostics, err := commandContext(ctx, stderr, *logLevel, *logFormat, "scan")
+	if err != nil {
+		fmt.Fprintln(stderr, "goscan:", err)
+		return 2
+	}
+	defer finishDiagnostics()
 
 	s := scanner.New()
 	s.ToolVersion = strings.TrimPrefix(Version, "v")
@@ -252,6 +261,8 @@ func runFix(args []string, stdout, stderr io.Writer) int {
 	})
 	formatName := fs.String("format", cfg.Output.Format, "output format: terminal, json, sarif")
 	timeout := fs.Duration("timeout", cfg.Fix.Timeout, "overall fix/verification timeout")
+	logLevel := fs.String("log-level", cfg.Logging.Level, "diagnostic log level: disabled, trace, debug, info, warn, error")
+	logFormat := fs.String("log-format", cfg.Logging.Format, "diagnostic log format: text, json")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -306,6 +317,12 @@ func runFix(args []string, stdout, stderr io.Writer) int {
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
+	ctx, finishDiagnostics, err := commandContext(ctx, stderr, *logLevel, *logFormat, "fix")
+	if err != nil {
+		fmt.Fprintln(stderr, "goscan:", err)
+		return 2
+	}
+	defer finishDiagnostics()
 
 	s := scanner.New()
 	s.ToolVersion = strings.TrimPrefix(Version, "v")
@@ -408,11 +425,14 @@ func runDB(args []string, stdout, stderr io.Writer) int {
 // runDBUpdate downloads and installs one official-format Go vulnerability database snapshot.
 func runDBUpdate(args []string, stdout, stderr io.Writer) int {
 	defaultPath, defaultPathErr := vulndb.DefaultPath()
+	loggingDefaults := config.FromEnvironment().Logging
 	fs := flag.NewFlagSet("goscan db update", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	path := fs.String("path", defaultPath, "database installation directory")
 	source := fs.String("url", vulndb.DefaultURL, "database snapshot URL")
 	timeout := fs.Duration("timeout", 2*time.Minute, "download and installation timeout")
+	logLevel := fs.String("log-level", loggingDefaults.Level, "diagnostic log level: disabled, trace, debug, info, warn, error")
+	logFormat := fs.String("log-format", loggingDefaults.Format, "diagnostic log format: text, json")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -434,6 +454,12 @@ func runDBUpdate(args []string, stdout, stderr io.Writer) int {
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
+	ctx, finishDiagnostics, err := commandContext(ctx, stderr, *logLevel, *logFormat, "db update")
+	if err != nil {
+		fmt.Fprintln(stderr, "goscan db update:", err)
+		return 2
+	}
+	defer finishDiagnostics()
 	metadata, err := (vulndb.Updater{URL: *source}).Update(ctx, *path)
 	if err != nil {
 		fmt.Fprintln(stderr, "goscan db update:", err)
@@ -445,6 +471,23 @@ func runDBUpdate(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "Modified:   %s\n", metadata.Modified.Format(time.RFC3339))
 	fmt.Fprintf(stdout, "Advisories: %d\n", metadata.Advisories)
 	return 0
+}
+
+// commandContext attaches a command-scoped Zerolog logger and returns a
+// completion callback that records elapsed time without changing report output.
+func commandContext(parent context.Context, stderr io.Writer, level, format, command string) (context.Context, func(), error) {
+	logger, err := diagnostic.New(stderr, level, format)
+	if err != nil {
+		return nil, nil, err
+	}
+	logger = logger.With().Str("command", command).Str("version", Version).Logger()
+	ctx := logger.WithContext(parent)
+	started := time.Now()
+	logger.Info().Msg("command started")
+	finish := func() {
+		logger.Info().Dur("duration", time.Since(started)).Msg("command finished")
+	}
+	return ctx, finish, nil
 }
 
 // defaultVulnerabilityDatabase selects an explicit environment override or an installed cache.

@@ -14,14 +14,15 @@ import (
 
 // Config contains GoSCAn runtime settings loaded from config.yml, environment variables, and CLI flags.
 type Config struct {
-	GitHub GitHubConfig
-	NVD    NVDConfig
-	EPSS   EPSSConfig
-	Ignore IgnoreConfig
-	Health HealthConfig
-	Scan   ScanConfig
-	Fix    FixConfig
-	Output OutputConfig
+	GitHub  GitHubConfig
+	NVD     NVDConfig
+	EPSS    EPSSConfig
+	Ignore  IgnoreConfig
+	Health  HealthConfig
+	Scan    ScanConfig
+	Fix     FixConfig
+	Output  OutputConfig
+	Logging LoggingConfig
 }
 
 // GitHubConfig controls GitHub Advisory Database enrichment.
@@ -79,6 +80,12 @@ type OutputConfig struct {
 	Format string
 }
 
+// LoggingConfig controls opt-in Zerolog diagnostics written to stderr.
+type LoggingConfig struct {
+	Level  string
+	Format string
+}
+
 // fileConfig mirrors the YAML schema while preserving whether optional fields were set.
 type fileConfig struct {
 	GitHub *struct {
@@ -117,6 +124,10 @@ type fileConfig struct {
 	Output *struct {
 		Format *string `yaml:"format"`
 	} `yaml:"output"`
+	Logging *struct {
+		Level  *string `yaml:"level"`
+		Format *string `yaml:"format"`
+	} `yaml:"logging"`
 }
 
 // Default returns GoSCAn's built-in configuration.
@@ -137,7 +148,8 @@ func Default() Config {
 			Vulnerabilities: true,
 			Timeout:         5 * time.Minute,
 		},
-		Output: OutputConfig{Format: "terminal"},
+		Output:  OutputConfig{Format: "terminal"},
+		Logging: LoggingConfig{Level: "disabled", Format: "text"},
 	}
 }
 
@@ -332,7 +344,33 @@ func mergeFileConfig(cfg *Config, raw fileConfig) error {
 	if raw.Output != nil && raw.Output.Format != nil {
 		cfg.Output.Format = *raw.Output.Format
 	}
+	if raw.Logging != nil {
+		if raw.Logging.Level != nil {
+			level := strings.ToLower(strings.TrimSpace(*raw.Logging.Level))
+			if !oneOf(level, "disabled", "trace", "debug", "info", "warn", "error") {
+				return fmt.Errorf("logging.level must be disabled, trace, debug, info, warn, or error")
+			}
+			cfg.Logging.Level = level
+		}
+		if raw.Logging.Format != nil {
+			format := strings.ToLower(strings.TrimSpace(*raw.Logging.Format))
+			if !oneOf(format, "text", "json") {
+				return fmt.Errorf("logging.format must be text or json")
+			}
+			cfg.Logging.Format = format
+		}
+	}
 	return nil
+}
+
+// oneOf reports whether value equals one of the allowed strings.
+func oneOf(value string, allowed ...string) bool {
+	for _, candidate := range allowed {
+		if value == candidate {
+			return true
+		}
+	}
+	return false
 }
 
 // decodeIgnoreRule accepts legacy string rules and structured auditable rules.
@@ -379,6 +417,12 @@ func applyEnvironment(cfg *Config) {
 	}
 	if v := firstEnv("GOSCAN_NVD_API_KEY", "NVD_API_KEY"); v != "" {
 		cfg.NVD.APIKey = v
+	}
+	if v := firstEnv("GOSCAN_LOG_LEVEL"); v != "" {
+		cfg.Logging.Level = strings.ToLower(strings.TrimSpace(v))
+	}
+	if v := firstEnv("GOSCAN_LOG_FORMAT"); v != "" {
+		cfg.Logging.Format = strings.ToLower(strings.TrimSpace(v))
 	}
 }
 

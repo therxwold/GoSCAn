@@ -56,6 +56,11 @@ func TestActionRemediationContract(t *testing.T) {
 	if !strings.Contains(scan.run, "validate_repo_relative") {
 		t.Fatal("scan step does not enforce repository-relative path inputs")
 	}
+	for _, required := range []string{`--log-level "$GOSCAN_LOG_LEVEL"`, `--log-format "$GOSCAN_LOG_FORMAT"`} {
+		if !strings.Contains(scan.run, required) || !strings.Contains(fix.run, required) {
+			t.Fatalf("scan/fix steps do not preserve diagnostic option %q", required)
+		}
+	}
 	enforce := steps["Enforce scan result"]
 	if !strings.Contains(enforce.condition, "steps.scan.outputs.status != ''") {
 		t.Fatalf("enforcement condition can mask a skipped scan: %q", enforce.condition)

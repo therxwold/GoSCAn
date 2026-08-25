@@ -3,11 +3,11 @@
 
 github:
   enabled: true
-  token: "${GOSCAN_GITHUB_TOKEN}"
+  token: ${GOSCAN_GITHUB_TOKEN}
 
 nvd:
   enabled: true
-  api_key: "${GOSCAN_NVD_API_KEY}"
+  api_key: ${GOSCAN_NVD_API_KEY}
 
 epss:
   enabled: true
@@ -18,10 +18,10 @@ epss:
 ignore:
   show: false
   # GO-2026-1234:
-  #   reason: "vulnerable code path is not reachable in this application"
-  #   owner: "security@example.com"
+  #   reason: vulnerable code path is not reachable in this application
+  #   owner: security@example.com
   #   expires: "2026-12-31"
-  # golang.org/x/net@CVE-2026-12345: "not affected on supported targets"
+  # golang.org/x/net@CVE-2026-12345: not affected on supported targets
 
 # Dependency and Go release health is reported separately from CVEs.
 health:
@@ -33,11 +33,11 @@ health:
   fail_on_unmaintained: false
 
 scan:
-  fail_on: "none"
+  fail_on: none
   epss_threshold: -1
   show_manifests: false
   strict_enrichment: false
-  timeout: "2m"
+  timeout: 2m
 
 fix:
   run_tests: true
@@ -46,7 +46,13 @@ fix:
   upgrade_go: false
   # Only updates toolchain when the main go.mod already has a toolchain directive.
   upgrade_toolchain: false
-  timeout: "5m"
+  timeout: 5m
 
 output:
-  format: "terminal"
+  format: terminal
+
+# Zerolog diagnostics are opt-in and always go to stderr. JSON/SARIF reports
+# remain isolated on stdout.
+logging:
+  level: disabled
+  format: text

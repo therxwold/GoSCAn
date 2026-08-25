@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/therxwold/GoSCAn/internal/httpclient"
 	"github.com/therxwold/GoSCAn/internal/httpjson"
 	"golang.org/x/sync/errgroup"
 )
@@ -63,7 +64,7 @@ func (c Client) Query(ctx context.Context, modulePaths []string, readmeCutoff ti
 	}
 	hc := c.HTTPClient
 	if hc == nil {
-		hc = &http.Client{Timeout: 15 * time.Second}
+		hc = httpclient.New(15 * time.Second)
 	}
 
 	var mu sync.Mutex

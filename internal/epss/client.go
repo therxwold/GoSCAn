@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/therxwold/GoSCAn/internal/httpclient"
 	"github.com/therxwold/GoSCAn/internal/httpjson"
 	"github.com/therxwold/GoSCAn/internal/model"
 )
@@ -41,7 +42,7 @@ func (c Client) Query(ctx context.Context, cves []string) (map[string]model.EPSS
 	}
 	hc := c.HTTPClient
 	if hc == nil {
-		hc = &http.Client{Timeout: 15 * time.Second}
+		hc = httpclient.New(15 * time.Second)
 	}
 
 	for _, batch := range chunkCVEs(cves, 1800) {
