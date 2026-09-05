@@ -5,7 +5,7 @@ go 1.26
 toolchain go1.27.0
 
 require (
-	github.com/pandatix/go-cvss v0.6.2
+	github.com/pandatix/go-cvss v0.6.4
 	github.com/rs/zerolog v1.35.1
 	go.yaml.in/yaml/v3 v3.0.5
 	golang.org/x/mod v0.40.0
