@@ -1,6 +1,6 @@
 module github.com/therxwold/GoSCAn
 
-go 1.26
+go 1.26.0
 
 toolchain go1.27.0
 
@@ -8,8 +8,8 @@ require (
 	github.com/pandatix/go-cvss v0.6.4
 	github.com/rs/zerolog v1.35.1
 	go.yaml.in/yaml/v3 v3.0.5
-	golang.org/x/mod v0.40.0
-	golang.org/x/sync v0.22.0
+	golang.org/x/mod v0.41.0
+	golang.org/x/sync v0.23.0
 	golang.org/x/vuln v1.7.0
 )
 
