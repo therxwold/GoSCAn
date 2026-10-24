@@ -2,7 +2,7 @@ module github.com/therxwold/GoSCAn
 
 go 1.26.0
 
-toolchain go1.27.1
+toolchain go1.27.3
 
 require (
 	github.com/pandatix/go-cvss v0.6.4
