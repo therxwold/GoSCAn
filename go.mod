@@ -7,9 +7,9 @@ toolchain go1.27.3
 require (
 	github.com/pandatix/go-cvss v0.6.4
 	github.com/rs/zerolog v1.35.1
-	go.yaml.in/yaml/v3 v3.0.5
-	golang.org/x/mod v0.42.0
-	golang.org/x/sync v0.24.0
+	go.yaml.in/yaml/v3 v3.0.6
+	golang.org/x/mod v0.43.0
+	golang.org/x/sync v0.25.0
 	golang.org/x/vuln v1.9.0
 )
 
